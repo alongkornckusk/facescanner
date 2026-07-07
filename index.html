@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ระบบบันทึกเวลาปฏิบัติงานนักศึกษาแพทย์</title>
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- FontAwesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+  <!-- Google Fonts: TH Sarabun -->
+  <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
+  <!-- React & ReactDOM -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+  <!-- Babel (สำหรับแปลง React JSX ในเบราว์เซอร์) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Face-API.js -->
+  <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+
+  <style>
+    * { font-family: 'Sarabun', sans-serif !important; }
+    html { font-size: 17px; }
+  </style>
+</head>
+<body class="bg-[#0b1021] text-gray-200">
+  <div id="root"></div>
+
+  <!-- โหลด Firebase Modules -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getFirestore, collection, getDocs, doc, setDoc, getDoc, deleteDoc, addDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    window.FirebaseUtils = {
+      initializeApp, getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken,
+      getFirestore, collection, getDocs, doc, setDoc, getDoc, deleteDoc, addDoc
+    };
+    window.dispatchEvent(new Event('firebaseLoaded'));
+  </script>
+
+  <!-- React App Logic -->
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    // ==========================================
+    // ⚠️ ใส่ค่า CONFIG FIREBASE ของคุณที่นี่
+    // ==========================================
+    const FIREBASE_CONFIG = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+      apiKey: "AIzaSyBcVCcruKxJosQk_257Xia81tb8O9M9DTI",
+      authDomain: "facescanner-5099b.firebaseapp.com",
+      projectId: "facescanner-5099b",
+      storageBucket: "facescanner-5099b.firebasestorage.app",
+      messagingSenderId: "310651795855",
+      appId: "1:310651795855:web:2f22716c3177aa0267b3fa",
+      measurementId: "G-ZTQKYVHRC5"
+    };
+    
+    // ตั้งค่าพิกัดเริ่มต้น (ถ้าไม่ได้ตั้งผ่านเมนู Admin)
+    const WORKPLACE_LAT = 13.7649; 
+    const WORKPLACE_LON = 100.5383;
+    const ALLOWED_RADIUS_METERS = 1000;
+    const APP_ID = typeof __app_id !== 'undefined' ? __app_id : 'face-attendance-med'; // ชื่อโฟลเดอร์ในฐานข้อมูล
+
+    function App() {
+      const [user, setUser] = useState(null);
+      const [db, setDb] = useState(null);
+      const [view, setView] = useState('home'); 
+      const [checkInType, setCheckInType] = useState('normal'); 
+      
+      const [modelsLoaded, setModelsLoaded] = useState(false);
+      const [loadingMsg, setLoadingMsg] = useState('กำลังเริ่มต้นระบบ...');
+
+      useEffect(() => {
+        const initFirebase = async () => {
+          try {
+            const { initializeApp, getAuth, signInAnonymously, onAuthStateChanged, getFirestore, signInWithCustomToken } = window.FirebaseUtils;
+            const app = initializeApp(FIREBASE_CONFIG);
+            const auth = getAuth(app);
+            const database = getFirestore(app);
+            setDb(database);
+            
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+              await signInWithCustomToken(auth, __initial_auth_token);
+            } else {
+              await signInAnonymously(auth);
+            }
+            onAuthStateChanged(auth, (u) => { setUser(u); });
+          } catch (err) {
+            console.error(err);
+            setLoadingMsg("ไม่สามารถเชื่อมต่อฐานข้อมูลได้ กรุณาตั้งค่า Firebase Config");
+          }
+        };
+
+        if (window.FirebaseUtils) {
+          initFirebase();
+        } else {
+          window.addEventListener('firebaseLoaded', initFirebase);
+        }
+      }, []);
+
+      useEffect(() => {
+        const loadModels = async () => {
+          setLoadingMsg('กำลังโหลดโมเดล AI สแกนใบหน้า...');
+          try {
+            const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model';
+            await Promise.all([
+              window.faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL),
+              window.faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+              window.faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
+            ]);
+            setModelsLoaded(true);
+          } catch (err) {
+            setLoadingMsg("เกิดข้อผิดพลาดในการโหลด AI");
+          }
+        };
+        // wait for face-api to be ready
+        const checkFaceApi = setInterval(() => {
+          if(window.faceapi) {
+            clearInterval(checkFaceApi);
+            loadModels();
+          }
+        }, 100);
+      }, []);
+
+      const goHome = () => setView('home');
+
+      if (!modelsLoaded || !user || !db) {
+        return (
+          <div className="min-h-screen bg-[#0b1021] flex items-center justify-center p-4">
+            <div className="bg-[#151c33] p-8 rounded-3xl shadow-2xl flex flex-col items-center animate-pulse max-w-sm w-full border border-white/5">
+              <i className="fa-solid fa-arrows-rotate text-blue-400 text-4xl animate-spin mb-4"></i>
+              <h2 className="text-xl font-bold text-gray-200 text-center">{loadingMsg}</h2>
+            </div>
+          </div>
+        );
+      }
+
+      const getHeaderTitle = () => {
+        if (view === 'register') return 'ลงทะเบียนผู้ใช้งานใหม่';
+        if (view === 'checkin') return checkInType === 'shift' ? 'สแกนเข้าเวร' : 'สแกนเข้างาน';
+        if (view === 'history') return 'ประวัติการเข้างาน';
+        if (view === 'admin') return 'ตั้งค่าระบบ';
+        return '';
+      };
+
+      return (
+        <div className="min-h-screen bg-[#0b1021] bg-gradient-to-br from-[#0a0f24] via-[#101735] to-[#0a0f24] pb-10 relative overflow-x-hidden">
+          <div className="absolute top-[-10%] left-[-10%] w-96 h-96 bg-blue-600/10 rounded-full blur-[120px] pointer-events-none"></div>
+          <div className="absolute bottom-[-10%] right-[-10%] w-96 h-96 bg-emerald-600/10 rounded-full blur-[120px] pointer-events-none"></div>
+
+          {view === 'home' ? (
+            <div className="pt-16 pb-8 flex flex-col items-center justify-center text-center relative z-10 px-4">
+              <div className="w-20 h-20 rounded-full bg-[#1e293b] border-2 border-yellow-500/30 flex items-center justify-center shadow-[0_0_20px_rgba(234,179,8,0.15)] mb-6 overflow-hidden text-4xl">⚕️</div>
+              <h1 className="text-2xl md:text-3xl font-bold text-white mb-2 tracking-wide">ระบบบันทึกเวลาปฏิบัติงานนักศึกษาแพทย์</h1>
+              <p className="text-gray-400 text-sm font-light">Face Recognition & GPS Attendance</p>
+            </div>
+          ) : (
+            <header className="bg-[#151c33]/80 backdrop-blur-md sticky top-0 z-50 border-b border-white/5">
+              <div className="max-w-4xl mx-auto px-4 py-4 flex items-center">
+                <button onClick={goHome} className="p-2 w-10 h-10 flex items-center justify-center mr-4 bg-white/5 rounded-full hover:bg-white/10 transition text-gray-300">
+                  <i className="fa-solid fa-chevron-left"></i>
+                </button>
+                <h1 className="text-lg font-bold text-white flex-1">{getHeaderTitle()}</h1>
+              </div>
+            </header>
+          )}
+
+          <main className="max-w-4xl mx-auto px-4 relative z-10 mt-4">
+            {view === 'home' && <HomeView setView={setView} setCheckInType={setCheckInType} />}
+            {view === 'register' && <RegisterView db={db} goHome={goHome} />}
+            {view === 'checkin' && <CheckInView db={db} checkInType={checkInType} goHome={goHome} />}
+            {view === 'history' && <HistoryView db={db} />}
+            {view === 'admin' && <AdminLocationView db={db} />}
+          </main>
+        </div>
+      );
+    }
+
+    // ==========================================
+    // 1. HOME VIEW
+    // ==========================================
+    function HomeView({ setView, setCheckInType }) {
+      const MenuItem = ({ iconClass, iconBg, title, subtitle, onClick }) => (
+        <div onClick={onClick} className="flex items-center justify-between p-4 bg-[#151c33]/60 hover:bg-[#1a2342] border border-white/5 rounded-2xl cursor-pointer transition-all w-full backdrop-blur-sm group shadow-lg">
+          <div className="flex items-center gap-4">
+            <div className={`w-12 h-12 rounded-xl flex items-center justify-center shadow-inner ${iconBg}`}>
+              <i className={`${iconClass} text-white text-xl`}></i>
+            </div>
+            <div className="flex flex-col text-left">
+              <span className="text-gray-100 font-semibold text-[15px]">{title}</span>
+              <span className="text-gray-400 text-xs mt-0.5">{subtitle}</span>
+            </div>
+          </div>
+          <i className="fa-solid fa-chevron-right text-gray-500 group-hover:text-gray-300 transition-colors"></i>
+        </div>
+      );
+
+      return (
+        <div className="flex flex-col w-full max-w-[420px] mx-auto gap-3 pb-10">
+          <MenuItem iconClass="fa-solid fa-user-plus" iconBg="bg-indigo-500 shadow-indigo-500/20" title="ลงทะเบียนผู้ใช้งานใหม่" subtitle="บันทึกข้อมูลใบหน้าใหม่" onClick={() => setView('register')} />
+          <MenuItem iconClass="fa-solid fa-camera" iconBg="bg-emerald-500 shadow-emerald-500/20" title="สแกนเข้างาน" subtitle="ยืนยันตัวตนด้วยใบหน้า + GPS" onClick={() => { setCheckInType('normal'); setView('checkin'); }} />
+          <MenuItem iconClass="fa-solid fa-moon" iconBg="bg-amber-500 shadow-amber-500/20" title="สแกนเข้าเวร" subtitle="ยืนยันตัวตนด้วยใบหน้า + GPS" onClick={() => { setCheckInType('shift'); setView('checkin'); }} />
+          <MenuItem iconClass="fa-solid fa-clipboard-list" iconBg="bg-blue-600 shadow-blue-600/20" title="ประวัติการเข้างาน" subtitle="ตรวจสอบข้อมูลการเข้างาน/เข้าเวร" onClick={() => setView('history')} />
+          <MenuItem iconClass="fa-solid fa-gear" iconBg="bg-slate-600 shadow-slate-600/20" title="ตั้งค่าระบบ" subtitle="จัดการ GPS และ API (Admin)" onClick={() => setView('admin')} />
+        </div>
+      );
+    }
+
+    // ==========================================
+    // 2. REGISTER VIEW
+    // ==========================================
+    function RegisterView({ db, goHome }) {
+      const [step, setStep] = useState(1); 
+      const [formData, setFormData] = useState({ empId: '', name: '' });
+      const [descriptors, setDescriptors] = useState([]);
+      const [error, setError] = useState('');
+      const [isProcessing, setIsProcessing] = useState(false);
+      const [loadingMsg, setLoadingMsg] = useState('');
+      const videoRef = useRef(null);
+
+      useEffect(() => { return () => stopCamera(); }, []);
+
+      const stopCamera = () => {
+        if (videoRef.current && videoRef.current.srcObject) {
+          videoRef.current.srcObject.getTracks().forEach(track => track.stop());
+        }
+      };
+
+      const startCamera = async () => {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+          if (videoRef.current) videoRef.current.srcObject = stream;
+        } catch (err) {
+          setError('ไม่สามารถเข้าถึงกล้องได้ กรุณาตรวจสอบการอนุญาต');
+        }
+      };
+
+      const handleInfoSubmit = async (e) => {
+        e.preventDefault();
+        if (!formData.empId || !formData.name) return setError('กรุณากรอกข้อมูลให้ครบถ้วน');
+        
+        setIsProcessing(true);
+        setError('');
+        try {
+          const { doc, getDoc } = window.FirebaseUtils;
+          const empRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'employees', formData.empId);
+          const docSnap = await getDoc(empRef);
+          
+          if (docSnap.exists()) {
+            setError('รหัสนักศึกษานี้มีการลงทะเบียนแล้วในระบบ');
+            setIsProcessing(false);
+            return;
+          }
+          setStep(2);
+          startCamera();
+        } catch (err) {
+          setError('เกิดข้อผิดพลาดในการตรวจสอบข้อมูล');
+        }
+        setIsProcessing(false);
+      };
+
+      const captureFace = async (currentStep) => {
+        if (!videoRef.current) return;
+        setIsProcessing(true);
+        setError('');
+
+        try {
+          const detection = await window.faceapi.detectSingleFace(videoRef.current).withFaceLandmarks().withFaceDescriptor();
+
+          if (!detection) {
+            setError('ไม่พบใบหน้า กรุณามองที่กล้องและอยู่ในที่สว่าง');
+            setIsProcessing(false);
+            return;
+          }
+
+          const descriptorArray = Array.from(detection.descriptor);
+          const newDescriptors = [...descriptors, descriptorArray];
+          setDescriptors(newDescriptors);
+
+          if (currentStep === 4) {
+            setLoadingMsg('กำลังบันทึกข้อมูล...');
+            await saveEmployee(newDescriptors);
+          } else {
+            setStep(currentStep + 1);
+          }
+        } catch (err) {
+          setError('เกิดข้อผิดพลาดในการสแกนใบหน้า');
+        }
+        setIsProcessing(false);
+      };
+
+      const saveEmployee = async (finalDescriptors) => {
+        try {
+          const { doc, setDoc } = window.FirebaseUtils;
+          const empRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'employees', formData.empId);
+          await setDoc(empRef, {
+            empId: formData.empId,
+            name: formData.name,
+            descriptors: JSON.stringify(finalDescriptors), 
+            registeredAt: new Date().toISOString()
+          });
+          stopCamera();
+          setStep(5);
+        } catch (err) {
+          setError('ไม่สามารถบันทึกข้อมูลได้: ' + err.message);
+        }
+      };
+
+      return (
+        <div className="bg-[#151c33] border border-white/5 rounded-3xl shadow-xl overflow-hidden max-w-2xl mx-auto p-8">
+          {error && (
+            <div className="mb-6 p-4 bg-red-900/30 border border-red-500/50 text-red-400 rounded-xl flex items-start gap-2 text-sm">
+              <i className="fa-solid fa-circle-exclamation mt-0.5"></i>
+              <p>{error}</p>
+            </div>
+          )}
+
+          {step === 1 && (
+            <form onSubmit={handleInfoSubmit} className="space-y-5">
+              <div>
+                <label className="block text-sm font-semibold text-gray-300 mb-2">รหัสประจำตัว (ห้ามซ้ำ)</label>
+                <input type="text" className="w-full p-4 bg-[#0a0f24] border border-gray-700 text-white rounded-xl outline-none" placeholder="เช่น 64XXXXX" value={formData.empId} onChange={e => setFormData({...formData, empId: e.target.value})} disabled={isProcessing} />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-gray-300 mb-2">ชื่อ - นามสกุล</label>
+                <input type="text" className="w-full p-4 bg-[#0a0f24] border border-gray-700 text-white rounded-xl outline-none" placeholder="เช่น นศ.พ. ใจดี" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} disabled={isProcessing} />
+              </div>
+              <button type="submit" disabled={isProcessing} className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-4 rounded-xl mt-4">
+                {isProcessing ? 'กำลังตรวจสอบ...' : 'ถัดไป: สแกนใบหน้า'}
+              </button>
+            </form>
+          )}
+
+          {[2, 3, 4].includes(step) && (
+            <div className="flex flex-col items-center">
+              <h3 className="text-xl font-bold text-white mb-2">ขั้นตอนที่ {step - 1}/3</h3>
+              <p className="text-indigo-400 font-medium mb-6">
+                {step === 2 ? "กรุณาหันหน้าตรงและกดถ่ายรูป" : step === 3 ? "กรุณาหันหน้าไปทางซ้ายเล็กน้อย" : "กรุณาหันหน้าไปทางขวาเล็กน้อย"}
+              </p>
+              <div className="relative w-full max-w-sm aspect-video bg-[#0a0f24] rounded-2xl overflow-hidden mb-6 border border-white/5">
+                <video ref={videoRef} autoPlay muted playsInline className="w-full h-full object-cover scale-x-[-1]" />
+                <div className="absolute inset-0 border-4 border-dashed border-white/40 m-8 rounded-full pointer-events-none"></div>
+              </div>
+              <button onClick={() => captureFace(step)} disabled={isProcessing} className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-4 px-12 rounded-full flex items-center gap-2">
+                <i className="fa-solid fa-camera"></i> {isProcessing ? (loadingMsg || 'กำลังประมวลผล...') : 'ถ่ายภาพ'}
+              </button>
+            </div>
+          )}
+
+          {step === 5 && (
+            <div className="text-center py-10">
+              <div className="w-24 h-24 bg-green-500/20 border border-green-500/50 rounded-full flex items-center justify-center mx-auto mb-6">
+                <i className="fa-solid fa-circle-check text-5xl text-green-400"></i>
+              </div>
+              <h3 className="text-2xl font-bold text-white mb-2">ลงทะเบียนสำเร็จ!</h3>
+              <p className="text-gray-400 mb-8">ข้อมูลของคุณถูกบันทึกเข้าระบบเรียบร้อยแล้ว</p>
+              <button onClick={goHome} className="bg-white/10 border border-white/10 text-white font-bold py-3 px-8 rounded-xl">กลับหน้าหลัก</button>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ==========================================
+    // 3. CHECK-IN VIEW
+    // ==========================================
+    function CheckInView({ db, checkInType, goHome }) {
+      const [step, setStep] = useState('location'); 
+      const [locationStatus, setLocationStatus] = useState('กำลังตรวจสอบพิกัด...');
+      const [error, setError] = useState('');
+      const [isProcessing, setIsProcessing] = useState(false);
+      const [matchData, setMatchData] = useState(null);
+      const videoRef = useRef(null);
+
+      useEffect(() => { if (step === 'location') checkLocation(); return () => stopCamera(); }, [step]);
+
+      const stopCamera = () => {
+        if (videoRef.current && videoRef.current.srcObject) {
+          videoRef.current.srcObject.getTracks().forEach(track => track.stop());
+        }
+      };
+
+      const getDistance = (lat1, lon1, lat2, lon2) => {
+        const R = 6371e3; 
+        const p1 = lat1 * Math.PI/180; const p2 = lat2 * Math.PI/180;
+        const dp = (lat2-lat1) * Math.PI/180; const dl = (lon2-lon1) * Math.PI/180;
+        const a = Math.sin(dp/2) * Math.sin(dp/2) + Math.cos(p1) * Math.cos(p2) * Math.sin(dl/2) * Math.sin(dl/2);
+        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)); 
+      };
+
+      const checkLocation = async () => {
+        if (!navigator.geolocation) return setError('เบราว์เซอร์ไม่รองรับ GPS');
+        try {
+          const { collection, getDocs } = window.FirebaseUtils;
+          const locSnap = await getDocs(collection(db, 'artifacts', APP_ID, 'public', 'data', 'locations'));
+          const activeLocations = [];
+          locSnap.forEach(doc => activeLocations.push({ id: doc.id, ...doc.data() }));
+
+          navigator.geolocation.getCurrentPosition(
+            (pos) => {
+              const { latitude, longitude } = pos.coords;
+              let isAllowed = false, minDistance = Infinity;
+
+              for (const loc of activeLocations) {
+                const distance = getDistance(latitude, longitude, loc.lat, loc.lng);
+                if (distance < minDistance) minDistance = distance;
+                if (distance <= loc.radius) { isAllowed = true; break; }
+              }
+
+              if (activeLocations.length === 0) {
+                minDistance = getDistance(latitude, longitude, WORKPLACE_LAT, WORKPLACE_LON);
+                if (minDistance <= ALLOWED_RADIUS_METERS) isAllowed = true;
+              }
+
+              if (isAllowed) { setStep('camera'); startCamera(); } 
+              else {
+                setError(`คุณอยู่นอกพื้นที่ (ห่างจากจุดที่ใกล้ที่สุด ${Math.round(minDistance)} เมตร)`);
+                setLocationStatus('ไม่อนุญาตให้เช็คอิน');
+              }
+            },
+            (err) => {
+              setError('ไม่สามารถดึงตำแหน่งได้ กรุณาเปิด GPS');
+              setLocationStatus('ข้อผิดพลาดทางพิกัด');
+            }, { enableHighAccuracy: true }
+          );
+        } catch (err) { setError('เกิดข้อผิดพลาด: ' + err.message); }
+      };
+
+      const startCamera = async () => {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
+          if (videoRef.current) videoRef.current.srcObject = stream;
+        } catch (err) { setError('ไม่สามารถเข้าถึงกล้องได้'); }
+      };
+
+      const handleScan = async () => {
+        if (!videoRef.current) return;
+        setIsProcessing(true); setError('');
+
+        try {
+          const detection = await window.faceapi.detectSingleFace(videoRef.current).withFaceLandmarks().withFaceDescriptor();
+          if (!detection) { setError('ไม่พบใบหน้า กรุณามองที่กล้อง'); setIsProcessing(false); return; }
+
+          const { collection, getDocs } = window.FirebaseUtils;
+          const empSnapshot = await getDocs(collection(db, 'artifacts', APP_ID, 'public', 'data', 'employees'));
+          
+          if (empSnapshot.empty) { setError('ไม่มีข้อมูลในระบบ'); setIsProcessing(false); return; }
+
+          const labeledDescriptors = [];
+          empSnapshot.forEach((doc) => {
+            const data = doc.data();
+            if (data.descriptors) {
+              const float32Descs = JSON.parse(data.descriptors).map(d => new Float32Array(d));
+              labeledDescriptors.push(new window.faceapi.LabeledFaceDescriptors(data.empId + "|||" + data.name, float32Descs));
+            }
+          });
+
+          const faceMatcher = new window.faceapi.FaceMatcher(labeledDescriptors, 0.45); 
+          const bestMatch = faceMatcher.findBestMatch(detection.descriptor);
+
+          if (bestMatch.label === 'unknown') setError('ไม่พบข้อมูลใบหน้านี้ในระบบ');
+          else {
+            const [empId, name] = bestMatch.label.split("|||");
+            await saveAttendanceLog(empId, name);
+          }
+        } catch (err) { setError('เกิดข้อผิดพลาดในการประมวลผล'); }
+        setIsProcessing(false);
+      };
+
+      const saveAttendanceLog = async (empId, name) => {
+        try {
+          const { doc, setDoc, collection } = window.FirebaseUtils;
+          const logId = Date.now().toString();
+          await setDoc(doc(collection(db, 'artifacts', APP_ID, 'public', 'data', 'attendance_logs'), logId), {
+            empId, name, timestamp: new Date().toISOString(), type: checkInType
+          });
+          setMatchData({ empId, name }); stopCamera(); setStep('success');
+        } catch (err) { setError('บันทึกประวัติล้มเหลว'); }
+      };
+
+      const theme = checkInType === 'shift' ? 'amber' : 'emerald';
+
+      return (
+        <div className="bg-[#151c33] border border-white/5 rounded-3xl shadow-xl overflow-hidden max-w-2xl mx-auto p-8">
+          {error && (
+            <div className="mb-6 p-4 bg-red-900/30 border border-red-500/50 text-red-400 rounded-xl flex items-start gap-2 text-sm">
+              <i className="fa-solid fa-circle-exclamation mt-0.5"></i> <p>{error}</p>
+            </div>
+          )}
+
+          {step === 'location' && (
+            <div className="text-center py-12 flex flex-col items-center">
+              <div className={`w-20 h-20 bg-${theme}-500/20 border border-${theme}-500/50 rounded-full flex items-center justify-center mb-6 animate-pulse`}>
+                <i className={`fa-solid fa-location-dot text-4xl text-${theme}-400`}></i>
+              </div>
+              <h3 className="text-xl font-bold text-white mb-2">{locationStatus}</h3>
+            </div>
+          )}
+
+          {step === 'camera' && (
+            <div className="flex flex-col items-center">
+              <div className={`w-full flex justify-between items-center mb-4 text-sm font-semibold text-${theme}-400 bg-${theme}-500/10 border border-${theme}-500/20 px-4 py-3 rounded-xl`}>
+                <span className="flex items-center gap-2"><i className="fa-solid fa-map"></i> พิกัดถูกต้อง</span>
+                <span>พร้อมสแกนหน้า</span>
+              </div>
+              <div className="relative w-full max-w-sm aspect-video bg-[#0a0f24] rounded-2xl overflow-hidden mb-6 border border-white/5">
+                <video ref={videoRef} autoPlay muted playsInline className="w-full h-full object-cover scale-x-[-1]" />
+                <div className="absolute inset-0 border-4 border-dashed border-white/40 m-8 rounded-[3rem] pointer-events-none"></div>
+              </div>
+              <button onClick={handleScan} disabled={isProcessing} className={`bg-${theme}-600 hover:bg-${theme}-500 text-white font-bold py-4 px-12 rounded-full w-full max-w-sm`}>
+                {isProcessing ? 'กำลังตรวจสอบใบหน้า...' : 'กดเพื่อสแกนใบหน้า'}
+              </button>
+            </div>
+          )}
+
+          {step === 'success' && matchData && (
+            <div className="text-center py-10">
+              <div className={`w-24 h-24 bg-${theme}-500/20 border border-${theme}-500/50 rounded-full flex items-center justify-center mx-auto mb-6`}>
+                <i className={`fa-solid fa-circle-check text-5xl text-${theme}-400`}></i>
+              </div>
+              <h3 className="text-2xl font-bold text-white mb-2">บันทึกสำเร็จ!</h3>
+              <div className="bg-[#0a0f24] border border-white/10 rounded-xl p-5 inline-block mb-8 text-left min-w-[250px]">
+                <p className="text-sm text-gray-400 mb-1">รหัสประจำตัว: <span className="font-bold text-white text-base ml-2">{matchData.empId}</span></p>
+                <p className="text-sm text-gray-400 mb-1">ชื่อ: <span className="font-bold text-white text-base ml-2">{matchData.name}</span></p>
+                <p className="text-sm text-gray-400 mb-1">ประเภท: <span className={`font-bold text-${theme}-400 text-base ml-2`}>{checkInType === 'shift' ? 'เข้าเวร' : 'เข้างาน'}</span></p>
+                <p className="text-sm text-gray-400 mt-3 pt-3 border-t border-white/10"><i className="fa-solid fa-clock"></i> <span className="font-mono text-gray-200">{new Date().toLocaleTimeString('th-TH')}</span></p>
+              </div><br/>
+              <button onClick={goHome} className="bg-white/10 border border-white/10 text-white font-bold py-3 px-8 rounded-xl">กลับหน้าหลัก</button>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ==========================================
+    // 4. HISTORY VIEW
+    // ==========================================
+    function HistoryView({ db }) {
+      const [logs, setLogs] = useState([]);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        const fetchLogs = async () => {
+          try {
+            const { collection, getDocs } = window.FirebaseUtils;
+            const snapshot = await getDocs(collection(db, 'artifacts', APP_ID, 'public', 'data', 'attendance_logs'));
+            const logsData = [];
+            snapshot.forEach(doc => logsData.push({ id: doc.id, ...doc.data() }));
+            logsData.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+            setLogs(logsData);
+          } catch (err) {}
+          setLoading(false);
+        };
+        fetchLogs();
+      }, [db]);
+
+      const exportCSV = () => {
+        if (logs.length === 0) return;
+        const headers = ['รหัสประจำตัว', 'ชื่อ-นามสกุล', 'วันที่', 'เวลา', 'ประเภท'];
+        const csvRows = [headers.join(',')];
+        logs.forEach(log => {
+          const d = new Date(log.timestamp);
+          csvRows.push([`"${log.empId}"`, `"${log.name}"`, `"${d.toLocaleDateString('th-TH')}"`, `"${d.toLocaleTimeString('th-TH')}"`, `"${log.type === 'shift' ? 'เข้าเวร' : 'เข้างาน'}"`].join(','));
+        });
+        const blob = new Blob(['\uFEFF' + csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `attendance_logs_${Date.now()}.csv`;
+        link.click();
+      };
+
+      return (
+        <div className="bg-[#151c33] border border-white/5 rounded-3xl shadow-xl overflow-hidden max-w-4xl mx-auto">
+          <div className="p-6 flex justify-end bg-black/20 border-b border-white/5">
+            <button onClick={exportCSV} disabled={logs.length===0} className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-xl flex items-center gap-2 text-sm disabled:opacity-50">
+              <i className="fa-solid fa-download"></i> Export Excel (CSV)
+            </button>
+          </div>
+          <div className="p-6">
+            {loading ? <div className="text-center py-10 text-gray-400">กำลังโหลด...</div> : logs.length === 0 ? <div className="text-center py-10 text-gray-500">ไม่มีข้อมูล</div> : (
+              <div className="overflow-x-auto rounded-xl border border-white/10 bg-[#0a0f24]">
+                <table className="w-full text-left border-collapse whitespace-nowrap">
+                  <thead>
+                    <tr className="border-b border-white/10 bg-white/5 text-gray-400 text-sm">
+                      <th className="p-4 w-16 text-center">ลำดับ</th><th className="p-4">รหัส</th><th className="p-4">ชื่อ-สกุล</th><th className="p-4">วัน/เวลา</th><th className="p-4 text-center">ประเภท</th>
+                    </tr>
+                  </thead>
+                  <tbody className="text-sm">
+                    {logs.map((log, index) => (
+                      <tr key={log.id} className="border-b border-white/5 hover:bg-white/5">
+                        <td className="p-4 text-center text-gray-500">{index + 1}</td>
+                        <td className="p-4 text-gray-200">{log.empId}</td>
+                        <td className="p-4 text-gray-300">{log.name}</td>
+                        <td className="p-4 text-gray-400">{new Date(log.timestamp).toLocaleString('th-TH')}</td>
+                        <td className="p-4 text-center">
+                          <span className={`px-3 py-1 rounded-full text-xs font-bold border ${log.type === 'shift' ? 'bg-amber-500/10 text-amber-400 border-amber-500/30' : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'}`}>
+                            {log.type === 'shift' ? 'เข้าเวร' : 'เข้างาน'}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // ==========================================
+    // 5. ADMIN LOCATION VIEW
+    // ==========================================
+    function AdminLocationView({ db }) {
+      const [locations, setLocations] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [formData, setFormData] = useState({ name: '', lat: '', lng: '', radius: 1000 });
+      const [error, setError] = useState('');
+
+      const fetchLocs = async () => {
+        try {
+          const { collection, getDocs } = window.FirebaseUtils;
+          const snap = await getDocs(collection(db, 'artifacts', APP_ID, 'public', 'data', 'locations'));
+          const locs = [];
+          snap.forEach(doc => locs.push({ id: doc.id, ...doc.data() }));
+          setLocations(locs);
+        } catch(e) {}
+        setLoading(false);
+      };
+
+      useEffect(() => { fetchLocs(); }, [db]);
+
+      const getCurrentLoc = () => {
+        if(!navigator.geolocation) return setError('ไม่รองรับ GPS');
+        navigator.geolocation.getCurrentPosition(
+          pos => setFormData(p => ({...p, lat: pos.coords.latitude, lng: pos.coords.longitude})),
+          err => setError('ดึงพิกัดไม่ได้')
+        );
+      };
+
+      const handleAdd = async (e) => {
+        e.preventDefault();
+        if(!formData.name || !formData.lat || !formData.lng || !formData.radius) return setError('กรอกข้อมูลให้ครบ');
+        setError('');
+        try {
+          const { collection, addDoc } = window.FirebaseUtils;
+          await addDoc(collection(db, 'artifacts', APP_ID, 'public', 'data', 'locations'), {
+            name: formData.name, lat: parseFloat(formData.lat), lng: parseFloat(formData.lng), radius: parseInt(formData.radius, 10)
+          });
+          setFormData({ name: '', lat: '', lng: '', radius: 1000 });
+          fetchLocs();
+        } catch(e) { setError('บันทึกไม่ได้'); }
+      };
+
+      const handleDel = async (id) => {
+        if(!window.confirm('ยืนยันการลบ?')) return;
+        try {
+          const { doc, deleteDoc } = window.FirebaseUtils;
+          await deleteDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'locations', id));
+          fetchLocs();
+        } catch(e) { setError('ลบไม่ได้'); }
+      };
+
+      return (
+        <div className="bg-[#151c33] border border-white/5 rounded-3xl shadow-xl overflow-hidden max-w-4xl mx-auto p-8">
+          {error && <div className="mb-6 p-4 bg-red-900/30 text-red-400 rounded-xl">{error}</div>}
+          <div className="grid md:grid-cols-3 gap-8">
+            <div className="md:col-span-1 bg-[#0a0f24] p-6 rounded-2xl border border-white/10 h-fit">
+              <h3 className="text-lg font-bold text-white mb-4"><i className="fa-solid fa-location-dot"></i> เพิ่มสถานที่</h3>
+              <form onSubmit={handleAdd} className="space-y-4">
+                <input type="text" placeholder="ชื่อสถานที่" className="w-full p-3 bg-[#151c33] text-white rounded-xl outline-none" value={formData.name} onChange={e=>setFormData({...formData, name: e.target.value})} />
+                <div className="grid grid-cols-2 gap-2">
+                  <input type="number" step="any" placeholder="Lat" className="w-full p-3 bg-[#151c33] text-white rounded-xl outline-none" value={formData.lat} onChange={e=>setFormData({...formData, lat: e.target.value})} />
+                  <input type="number" step="any" placeholder="Lng" className="w-full p-3 bg-[#151c33] text-white rounded-xl outline-none" value={formData.lng} onChange={e=>setFormData({...formData, lng: e.target.value})} />
+                </div>
+                <button type="button" onClick={getCurrentLoc} className="w-full py-2 bg-blue-500/10 text-blue-400 rounded-xl text-sm"><i className="fa-solid fa-crosshairs"></i> ดึงพิกัดปัจจุบัน</button>
+                <input type="number" placeholder="ระยะ(เมตร)" className="w-full p-3 bg-[#151c33] text-white rounded-xl outline-none" value={formData.radius} onChange={e=>setFormData({...formData, radius: e.target.value})} />
+                <button type="submit" className="w-full bg-slate-600 text-white font-bold py-3 rounded-xl">บันทึก</button>
+              </form>
+            </div>
+            <div className="md:col-span-2">
+              <h3 className="text-lg font-bold text-white mb-4">สถานที่ที่อนุญาตให้เช็คอิน</h3>
+              {loading ? <p className="text-gray-500">โหลด...</p> : locations.length === 0 ? <p className="text-yellow-400">ยังไม่มีการตั้งค่า ใช้พิกัดเริ่มต้น</p> : (
+                <div className="space-y-3">
+                  {locations.map(loc => (
+                    <div key={loc.id} className="bg-[#0a0f24] border border-white/10 rounded-2xl p-4 flex justify-between items-center">
+                      <div>
+                        <h4 className="text-gray-200 font-bold">{loc.name}</h4>
+                        <div className="text-xs text-gray-500">Lat: {Number(loc.lat).toFixed(4)} | Lng: {Number(loc.lng).toFixed(4)} | รัศมี {loc.radius}m</div>
+                      </div>
+                      <button onClick={()=>handleDel(loc.id)} className="p-2 bg-red-500/10 text-red-400 rounded-xl"><i className="fa-solid fa-trash"></i></button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // Initialize React
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
