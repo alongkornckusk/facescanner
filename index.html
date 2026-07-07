@@ -50,7 +50,6 @@
     // ⚠️ ใส่ค่า CONFIG FIREBASE ของคุณที่นี่
     // ==========================================
     const FIREBASE_CONFIG = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
-      // แก้ปัญหา GitHub Secret Alert ด้วยการแยก String
       apiKey: "AIzaSy" + "BcVCcruKxJosQk_" + "257Xia81tb" + "8O9M9DTI",
       authDomain: "facescanner-5099b.firebaseapp.com",
       projectId: "facescanner-5099b",
@@ -107,7 +106,6 @@
         const loadModels = async () => {
           setLoadingMsg('กำลังโหลดโมเดล AI สแกนใบหน้า...');
           try {
-            // เพิ่ม trailing slash (/) ตอนท้าย เพื่อให้ Face-API ดึงโมเดลได้อย่างถูกต้อง
             const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
             await Promise.all([
               window.faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL),
@@ -180,7 +178,7 @@
             {view === 'register' && <RegisterView db={db} goHome={goHome} />}
             {view === 'checkin' && <CheckInView db={db} checkInType={checkInType} goHome={goHome} />}
             {view === 'history' && <HistoryView db={db} />}
-            {view === 'admin' && <AdminLocationView db={db} />}
+            {view === 'admin' && <AdminGateView db={db} goHome={goHome} />}
           </main>
         </div>
       );
@@ -312,7 +310,6 @@
         setError('');
 
         try {
-          // เพิ่มดีเลย์เล็กน้อยเพื่อให้วิดีโอมีเฟรมภาพพร้อมตรวจจับ
           await new Promise(r => setTimeout(r, 100));
 
           const detection = await window.faceapi
@@ -417,7 +414,7 @@
     }
 
     // ==========================================
-    // 3. CHECK-IN VIEW
+    // 3. CHECK-IN VIEW (REAL-TIME AUTO SCAN & FAST GPS)
     // ==========================================
     function CheckInView({ db, checkInType, goHome }) {
       const [step, setStep] = useState('location'); 
@@ -425,13 +422,43 @@
       const [error, setError] = useState('');
       const [isProcessing, setIsProcessing] = useState(false);
       const [matchData, setMatchData] = useState(null);
+      const [autoScanStatus, setAutoScanStatus] = useState('สแกนเนอร์กำลังค้นหาใบหน้า...');
       const videoRef = useRef(null);
+      const scanIntervalRef = useRef(null);
+      const isAnalyzingRef = useRef(false); // ป้องกันคิวการวิเคราะห์ซ้อนทับกัน
 
-      useEffect(() => { if (step === 'location') checkLocation(); return () => stopCamera(); }, [step]);
+      useEffect(() => { 
+        if (step === 'location') {
+          checkLocation(); 
+        } else if (step === 'camera') {
+          startCamera();
+        }
+        return () => {
+          stopCamera();
+          stopAutoScan();
+        }; 
+      }, [step]);
 
       const stopCamera = () => {
         if (videoRef.current && videoRef.current.srcObject) {
           videoRef.current.srcObject.getTracks().forEach(track => track.stop());
+        }
+      };
+
+      const startAutoScan = () => {
+        stopAutoScan();
+        // ตั้งหน่วงเวลาเปรียบเทียบหาใบหน้าอย่างรวดเร็วต่อเนื่องทุกๆ 350ms
+        scanIntervalRef.current = setInterval(() => {
+          if (!isAnalyzingRef.current && videoRef.current && videoRef.current.readyState === 4) {
+            runRealTimeMatch();
+          }
+        }, 350);
+      };
+
+      const stopAutoScan = () => {
+        if (scanIntervalRef.current) {
+          clearInterval(scanIntervalRef.current);
+          scanIntervalRef.current = null;
         }
       };
 
@@ -451,6 +478,7 @@
           const activeLocations = [];
           locSnap.forEach(doc => activeLocations.push({ id: doc.id, ...doc.data() }));
 
+          // ปรับความเร็ว GPS ให้ดึงพิกัดที่แม่นยำและรวดเร็วข้ามค่าแคช (timeout 5s, maximumAge 0)
           navigator.geolocation.getCurrentPosition(
             (pos) => {
               const { latitude, longitude } = pos.coords;
@@ -467,16 +495,18 @@
                 if (minDistance <= ALLOWED_RADIUS_METERS) isAllowed = true;
               }
 
-              if (isAllowed) { setStep('camera'); startCamera(); } 
-              else {
+              if (isAllowed) { 
+                setStep('camera'); 
+              } else {
                 setError(`คุณอยู่นอกพื้นที่เช็คอินปฏิบัติงาน (ห่างจากจุดที่ใกล้ที่สุดประมาณ ${Math.round(minDistance)} เมตร)`);
                 setLocationStatus('ไม่อนุญาตให้สแกนเข้าปฏิบัติงาน');
               }
             },
             (err) => {
-              setError('ไม่สามารถระบุพิกัดได้ กรุณากดอนุญาตให้เข้าถึงสิทธิ์ที่ตั้ง (Location) และเปิด GPS');
+              setError('ไม่สามารถระบุพิกัดได้ กรุณากดอนุญาตสิทธิ์การเข้าถึงตำแหน่งพิกัด (Location) และเปิด GPS');
               setLocationStatus('ข้อผิดพลาดทางพิกัด');
-            }, { enableHighAccuracy: true }
+            }, 
+            { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
           );
         } catch (err) { setError('เกิดข้อผิดพลาด: ' + err.message); }
       };
@@ -488,34 +518,37 @@
             videoRef.current.srcObject = stream;
             videoRef.current.onloadedmetadata = () => {
               videoRef.current.play();
+              startAutoScan(); // เปิดใช้งานสแกนอัตโนมัติทันทีที่เล่นกล้องสำเร็จ
             };
           }
         } catch (err) { setError('ไม่สามารถเปิดใช้งานกล้องได้'); }
       };
 
-      const handleScan = async () => {
-        if (!videoRef.current) return;
-        setIsProcessing(true); setError('');
-
+      const runRealTimeMatch = async () => {
+        isAnalyzingRef.current = true;
         try {
-          // หน่วงเวลาเล็กน้อยเพื่อให้ภาพในเฟรมมีความพร้อม
-          await new Promise(r => setTimeout(r, 100));
-
           const detection = await window.faceapi
             .detectSingleFace(videoRef.current)
             .withFaceLandmarks()
             .withFaceDescriptor();
 
-          if (!detection) { 
-            setError('ไม่พบใบหน้า กรุณาหันหน้ามองตรงที่หน้าจอกล้อง และเลี่ยงพื้นที่ย้อนแสง'); 
-            setIsProcessing(false); 
-            return; 
+          if (!detection) {
+            setAutoScanStatus('กำลังสแกนหาใบหน้าของคุณ...');
+            isAnalyzingRef.current = false;
+            return;
           }
+
+          setAutoScanStatus('ตรวจพบใบหน้า! กำลังเปรียบเทียบฐานข้อมูล...');
 
           const { collection, getDocs } = window.FirebaseUtils;
           const empSnapshot = await getDocs(collection(db, 'artifacts', APP_ID, 'public', 'data', 'employees'));
           
-          if (empSnapshot.empty) { setError('ไม่มีข้อมูลพนักงานคนใดลงทะเบียนไว้ในระบบเลย'); setIsProcessing(false); return; }
+          if (empSnapshot.empty) {
+            setError('ไม่มีข้อมูลพนักงานคนใดลงทะเบียนไว้ในระบบเลย');
+            stopAutoScan();
+            isAnalyzingRef.current = false;
+            return;
+          }
 
           const labeledDescriptors = [];
           empSnapshot.forEach((doc) => {
@@ -530,16 +563,16 @@
           const bestMatch = faceMatcher.findBestMatch(detection.descriptor);
 
           if (bestMatch.label === 'unknown') {
-            setError('ไม่พบข้อมูลใบหน้านี้ในระบบ (การยืนยันตัวตนล้มเหลว)');
+            setAutoScanStatus('ไม่พบใบหน้านี้ในระบบ กรุณาลองมองกล้องชัดๆ');
           } else {
             const [empId, name] = bestMatch.label.split("|||");
+            stopAutoScan(); // หยุดการสแกนอัตโนมัติทันทีที่เจอบุคคล
             await saveAttendanceLog(empId, name);
           }
-        } catch (err) { 
-          console.error("Match Error: ", err);
-          setError('เกิดข้อผิดพลาดในการประมวลผลใบหน้า: ' + err.message); 
+        } catch (err) {
+          console.error("Auto scan err:", err);
         }
-        setIsProcessing(false);
+        isAnalyzingRef.current = false;
       };
 
       const saveAttendanceLog = async (empId, name) => {
@@ -549,13 +582,14 @@
           await setDoc(doc(collection(db, 'artifacts', APP_ID, 'public', 'data', 'attendance_logs'), logId), {
             empId, name, timestamp: new Date().toISOString(), type: checkInType
           });
-          setMatchData({ empId, name }); stopCamera(); setStep('success');
+          setMatchData({ empId, name }); 
+          stopCamera(); 
+          setStep('success');
         } catch (err) { setError('บันทึกประวัติล้มเหลว'); }
       };
 
       const theme = checkInType === 'shift' ? 'amber' : 'emerald';
       const themeColor = checkInType === 'shift' ? 'text-amber-400 bg-amber-500/10 border-amber-500/20' : 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20';
-      const btnColor = checkInType === 'shift' ? 'bg-amber-600 hover:bg-amber-500 shadow-amber-600/30' : 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-600/30';
 
       return (
         <div className="bg-[#151c33]/80 border border-white/10 rounded-3xl shadow-xl overflow-hidden max-w-2xl mx-auto p-8 backdrop-blur-md">
@@ -580,17 +614,24 @@
               <div className={`w-full flex justify-between items-center mb-4 text-sm font-semibold p-4 rounded-xl border ${themeColor}`}>
                 <span className="flex items-center gap-2">
                   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M9 6.75V15m6-6v8m-3-12.125a2.25 2.25 0 114.5 0V18a2.25 2.25 0 01-4.5 0V3.625z" /></svg>
-                  พิกัดเข้างานถูกต้อง
+                  พิกัดเช็คอินถูกต้อง
                 </span>
-                <span>ระบบสแกนหน้าเปิดอยู่</span>
+                <span>กล้องกำลังทำงานอัตโนมัติ</span>
               </div>
-              <div className="relative w-full max-w-sm aspect-video bg-[#0a0f24] rounded-2xl overflow-hidden mb-6 border border-white/5">
+              
+              <div className="relative w-full max-w-sm aspect-video bg-[#0a0f24] rounded-2xl overflow-hidden mb-4 border border-white/5">
                 <video ref={videoRef} autoPlay muted playsInline className="w-full h-full object-cover scale-x-[-1]" />
-                <div className="absolute inset-0 border-4 border-dashed border-white/40 m-8 rounded-[3rem] pointer-events-none"></div>
+                
+                {/* แอนิเมชันกรอบสีเขียววิ่งตรวจจับใบหน้า */}
+                <div className="absolute inset-0 border-4 border-dashed border-indigo-400/40 m-8 rounded-[3rem] pointer-events-none animate-pulse"></div>
+                <div className="absolute top-0 left-0 w-full h-1.5 bg-indigo-500/50 animate-bounce"></div>
               </div>
-              <button onClick={handleScan} disabled={isProcessing} className={`text-white font-bold py-4 px-12 rounded-full w-full max-w-sm transition shadow-lg ${btnColor}`}>
-                {isProcessing ? 'กำลังตรวจสอบใบหน้า...' : 'กดเพื่อสแกนใบหน้า'}
-              </button>
+
+              {/* แสดงผลสถานะแบบเรียลไทม์เพื่อให้น่าสนใจและรวดเร็ว */}
+              <div className="flex items-center gap-2.5 px-6 py-3 bg-[#1e293b] border border-white/10 rounded-full shadow-inner text-sm text-gray-300 animate-pulse">
+                <span className="w-2.5 h-2.5 rounded-full bg-blue-500 animate-ping"></span>
+                <span>{autoScanStatus}</span>
+              </div>
             </div>
           )}
 
@@ -694,13 +735,97 @@
     }
 
     // ==========================================
-    // 5. ADMIN LOCATION VIEW
+    // 5. ADMIN GATE VIEW (ADMIN PASSCODE LOCK)
     // ==========================================
-    function AdminLocationView({ db }) {
+    function AdminGateView({ db, goHome }) {
+      const [isAuthorized, setIsAuthorized] = useState(false);
+      const [password, setPassword] = useState('');
+      const [error, setError] = useState('');
+      const [loading, setLoading] = useState(true);
+      const [dbPassword, setDbPassword] = useState('1234'); // รหัสผ่านตั้งต้น
+
+      useEffect(() => {
+        const fetchAdminPass = async () => {
+          try {
+            const { doc, getDoc } = window.FirebaseUtils;
+            const configRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'admin_config', 'security');
+            const snap = await getDoc(configRef);
+            if (snap.exists() && snap.data().pin) {
+              setDbPassword(snap.data().pin);
+            }
+          } catch (e) {
+            console.error("Fetch admin pass error:", e);
+          }
+          setLoading(false);
+        };
+        fetchAdminPass();
+      }, [db]);
+
+      const handleLogin = (e) => {
+        e.preventDefault();
+        if (password === dbPassword) {
+          setIsAuthorized(true);
+          setError('');
+        } else {
+          setError('รหัสผ่านสำหรับแอดมินไม่ถูกต้อง!');
+          setPassword('');
+        }
+      };
+
+      if (loading) {
+        return (
+          <div className="bg-[#151c33]/80 border border-white/10 rounded-3xl p-8 max-w-md mx-auto text-center">
+            <p className="text-gray-400">กำลังดาวน์โหลดระบบความปลอดภัย...</p>
+          </div>
+        );
+      }
+
+      if (isAuthorized) {
+        return <AdminLocationView db={db} dbPassword={dbPassword} setDbPassword={setDbPassword} />;
+      }
+
+      return (
+        <div className="bg-[#151c33]/80 border border-white/10 rounded-3xl shadow-xl overflow-hidden max-w-sm mx-auto p-8 backdrop-blur-md">
+          <div className="text-center mb-6">
+            <div className="w-16 h-16 bg-red-500/10 border border-red-500/30 rounded-full flex items-center justify-center mx-auto mb-4">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.8" stroke="currentColor" className="w-8 h-8 text-red-400"><path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" /></svg>
+            </div>
+            <h3 className="text-xl font-bold text-white mb-2">พื้นที่สำหรับแอดมิน</h3>
+            <p className="text-gray-400 text-xs">กรุณากรอกรหัสผ่านเพื่อเข้าสู่โหมดการตั้งค่า</p>
+          </div>
+
+          {error && <div className="p-3 bg-red-950/40 border border-red-500/30 text-red-400 rounded-xl text-center text-xs mb-4">{error}</div>}
+
+          <form onSubmit={handleLogin} className="space-y-4">
+            <input 
+              type="password" 
+              className="w-full p-4 bg-[#0a0f24] border border-white/10 text-white rounded-xl text-center text-lg tracking-widest outline-none focus:border-red-500 transition" 
+              placeholder="••••"
+              maxLength={12}
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+            />
+            <button type="submit" className="w-full py-3 bg-red-600 hover:bg-red-500 text-white font-bold rounded-xl transition">
+              เข้าสู่หน้าตั้งค่าระบบ
+            </button>
+            <button type="button" onClick={goHome} className="w-full text-center text-xs text-gray-500 hover:text-gray-300">
+              ยกเลิกและกลับหน้าหลัก
+            </button>
+          </form>
+        </div>
+      );
+    }
+
+    // ==========================================
+    // 6. ADMIN LOCATION VIEW (WITH PASSWORD UPDATE)
+    // ==========================================
+    function AdminLocationView({ db, dbPassword, setDbPassword }) {
       const [locations, setLocations] = useState([]);
       const [loading, setLoading] = useState(true);
       const [formData, setFormData] = useState({ name: '', lat: '', lng: '', radius: 1000 });
       const [error, setError] = useState('');
+      const [newAdminPin, setNewAdminPin] = useState('');
+      const [pinSuccess, setPinSuccess] = useState('');
 
       const fetchLocs = async () => {
         try {
@@ -719,7 +844,8 @@
         if(!navigator.geolocation) return setError('ไม่รองรับ GPS');
         navigator.geolocation.getCurrentPosition(
           pos => setFormData(p => ({...p, lat: pos.coords.latitude, lng: pos.coords.longitude})),
-          err => setError('ดึงพิกัดไม่ได้')
+          err => setError('ดึงพิกัดไม่ได้'),
+          { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
         );
       };
 
@@ -746,32 +872,75 @@
         } catch(e) { setError('ลบไม่ได้'); }
       };
 
+      const handleUpdatePin = async (e) => {
+        e.preventDefault();
+        if (!newAdminPin.trim()) return;
+        try {
+          const { doc, setDoc } = window.FirebaseUtils;
+          await setDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'admin_config', 'security'), {
+            pin: newAdminPin
+          });
+          setDbPassword(newAdminPin);
+          setPinSuccess('เปลี่ยนรหัสผ่านสำเร็จแล้ว!');
+          setNewAdminPin('');
+          setTimeout(() => setPinSuccess(''), 3000);
+        } catch (err) {
+          setError('ไม่สามารถเปลี่ยนรหัสผ่านได้: ' + err.message);
+        }
+      };
+
       return (
         <div className="bg-[#151c33]/80 border border-white/10 rounded-3xl shadow-xl overflow-hidden max-w-4xl mx-auto p-8 backdrop-blur-md">
           {error && <div className="mb-6 p-4 bg-red-900/30 text-red-400 rounded-xl">{error}</div>}
+          
           <div className="grid md:grid-cols-3 gap-8">
-            <div className="md:col-span-1 bg-[#0a0f24]/80 p-6 rounded-2xl border border-white/10 h-fit">
-              <h3 className="text-lg font-bold text-white mb-4 flex items-center gap-2">
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.8" stroke="currentColor" className="w-5 h-5 text-gray-400"><path strokeLinecap="round" strokeLinejoin="round" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" /></svg>
-                เพิ่มสถานที่
-              </h3>
-              <form onSubmit={handleAdd} className="space-y-4">
-                <input type="text" placeholder="ชื่อสถานที่" className="w-full p-3 bg-[#151c33] text-white rounded-xl outline-none border border-white/5 focus:border-blue-500 transition" value={formData.name} onChange={e=>setFormData({...formData, name: e.target.value})} />
-                <div className="grid grid-cols-2 gap-2">
-                  <input type="number" step="any" placeholder="Lat" className="w-full p-3 bg-[#151c33] text-white rounded-xl outline-none border border-white/5 focus:border-blue-500 transition text-sm" value={formData.lat} onChange={e=>setFormData({...formData, lat: e.target.value})} />
-                  <input type="number" step="any" placeholder="Lng" className="w-full p-3 bg-[#151c33] text-white rounded-xl outline-none border border-white/5 focus:border-blue-500 transition text-sm" value={formData.lng} onChange={e=>setFormData({...formData, lng: e.target.value})} />
-                </div>
-                <button type="button" onClick={getCurrentLoc} className="w-full py-2 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 rounded-xl text-sm transition flex items-center justify-center gap-1.5 border border-blue-500/20">
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M9 6.75V15m6-6v8m-3-12.125a2.25 2.25 0 114.5 0V18a2.25 2.25 0 01-4.5 0V3.625z" /></svg>
-                  ดึงพิกัดปัจจุบัน
-                </button>
-                <input type="number" placeholder="ระยะรัศมี (เมตร)" className="w-full p-3 bg-[#151c33] text-white rounded-xl outline-none border border-white/5 focus:border-blue-500 transition" value={formData.radius} onChange={e=>setFormData({...formData, radius: e.target.value})} />
-                <button type="submit" className="w-full bg-slate-600 hover:bg-slate-500 text-white font-bold py-3 rounded-xl transition">บันทึกสถานที่</button>
-              </form>
+            <div className="md:col-span-1 space-y-6">
+              {/* ส่วนเพิ่มสถานที่ */}
+              <div className="bg-[#0a0f24]/80 p-6 rounded-2xl border border-white/10">
+                <h3 className="text-md font-bold text-white mb-4 flex items-center gap-2">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.8" stroke="currentColor" className="w-5 h-5 text-gray-400"><path strokeLinecap="round" strokeLinejoin="round" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" /></svg>
+                  เพิ่มสถานที่ปฏิบัติงาน
+                </h3>
+                <form onSubmit={handleAdd} className="space-y-4">
+                  <input type="text" placeholder="ชื่อสถานที่" className="w-full p-3 bg-[#151c33] text-white rounded-xl outline-none border border-white/5 focus:border-blue-500 transition" value={formData.name} onChange={e=>setFormData({...formData, name: e.target.value})} />
+                  <div className="grid grid-cols-2 gap-2">
+                    <input type="number" step="any" placeholder="Lat" className="w-full p-3 bg-[#151c33] text-white rounded-xl outline-none border border-white/5 focus:border-blue-500 transition text-sm" value={formData.lat} onChange={e=>setFormData({...formData, lat: e.target.value})} />
+                    <input type="number" step="any" placeholder="Lng" className="w-full p-3 bg-[#151c33] text-white rounded-xl outline-none border border-white/5 focus:border-blue-500 transition text-sm" value={formData.lng} onChange={e=>setFormData({...formData, lng: e.target.value})} />
+                  </div>
+                  <button type="button" onClick={getCurrentLoc} className="w-full py-2.5 bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 rounded-xl text-xs transition flex items-center justify-center gap-1.5 border border-blue-500/20">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M9 6.75V15m6-6v8m-3-12.125a2.25 2.25 0 114.5 0V18a2.25 2.25 0 01-4.5 0V3.625z" /></svg>
+                    ดึงพิกัดปัจจุบันด่วน
+                  </button>
+                  <input type="number" placeholder="ระยะรัศมี (เมตร)" className="w-full p-3 bg-[#151c33] text-white rounded-xl outline-none border border-white/5 focus:border-blue-500 transition" value={formData.radius} onChange={e=>setFormData({...formData, radius: e.target.value})} />
+                  <button type="submit" className="w-full bg-slate-600 hover:bg-slate-500 text-white font-bold py-3 rounded-xl transition">บันทึกสถานที่</button>
+                </form>
+              </div>
+
+              {/* ส่วนแก้ไขรหัสแอดมิน */}
+              <div className="bg-[#0a0f24]/80 p-6 rounded-2xl border border-white/10">
+                <h3 className="text-md font-bold text-white mb-4 flex items-center gap-2">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.8" stroke="currentColor" className="w-5 h-5 text-gray-400"><path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" /></svg>
+                  เปลี่ยนรหัสผ่านแอดมิน
+                </h3>
+                {pinSuccess && <div className="p-2 mb-3 bg-green-950/40 border border-green-500/30 text-green-400 rounded-xl text-center text-xs">{pinSuccess}</div>}
+                <form onSubmit={handleUpdatePin} className="space-y-3">
+                  <input 
+                    type="password" 
+                    placeholder="รหัสผ่านใหม่" 
+                    className="w-full p-3 bg-[#151c33] text-white rounded-xl outline-none border border-white/5 focus:border-red-500 transition text-sm text-center" 
+                    value={newAdminPin} 
+                    onChange={e => setNewAdminPin(e.target.value)} 
+                  />
+                  <button type="submit" className="w-full py-2 bg-red-600 hover:bg-red-500 text-white font-bold text-xs rounded-xl transition">
+                    อัปเดตรหัสผ่าน
+                  </button>
+                </form>
+              </div>
             </div>
+
             <div className="md:col-span-2">
               <h3 className="text-lg font-bold text-white mb-4">สถานที่ที่อนุญาตให้เช็คอิน</h3>
-              {loading ? <p className="text-gray-500">กำลังโหลด...</p> : locations.length === 0 ? <p className="text-yellow-400">ยังไม่มีการตั้งค่า ระบบจะใช้พิกัดเริ่มต้น</p> : (
+              {loading ? <p className="text-gray-500">กำลังโหลด...</p> : locations.length === 0 ? <p className="text-yellow-400 text-sm">ยังไม่มีการตั้งค่า ระบบจะใช้พิกัดเริ่มต้น (กรุณาเพิ่มสถานที่อย่างน้อย 1 จุด)</p> : (
                 <div className="space-y-3">
                   {locations.map(loc => (
                     <div key={loc.id} className="bg-[#0a0f24]/80 border border-white/10 rounded-2xl p-4 flex justify-between items-center hover:border-white/20 transition">
