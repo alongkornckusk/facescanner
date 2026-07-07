@@ -584,7 +584,7 @@
             }
           });
 
-          const faceMatcher = new window.faceapi.FaceMatcher(labeledDescriptors, 0.45); 
+          const faceMatcher = new window.faceapi.FaceMatcher(labeledDescriptors, 0.40); 
           const bestMatch = faceMatcher.findBestMatch(detection.descriptor);
 
           if (bestMatch.label === 'unknown') {
