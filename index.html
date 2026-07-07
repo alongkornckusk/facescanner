@@ -32,11 +32,11 @@
   <!-- โหลด Firebase Modules -->
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-    import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
     import { getFirestore, collection, getDocs, doc, setDoc, getDoc, deleteDoc, addDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
     window.FirebaseUtils = {
-      initializeApp, getAuth, signInAnonymously, onAuthStateChanged,
+      initializeApp, getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken,
       getFirestore, collection, getDocs, doc, setDoc, getDoc, deleteDoc, addDoc
     };
     window.dispatchEvent(new Event('firebaseLoaded'));
@@ -77,13 +77,17 @@
       useEffect(() => {
         const initFirebase = async () => {
           try {
-            const { initializeApp, getAuth, signInAnonymously, onAuthStateChanged, getFirestore } = window.FirebaseUtils;
+            const { initializeApp, getAuth, signInAnonymously, onAuthStateChanged, getFirestore, signInWithCustomToken } = window.FirebaseUtils;
             const app = initializeApp(FIREBASE_CONFIG);
             const auth = getAuth(app);
             const database = getFirestore(app);
             setDb(database);
             
-            await signInAnonymously(auth);
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+              await signInWithCustomToken(auth, __initial_auth_token);
+            } else {
+              await signInAnonymously(auth);
+            }
             onAuthStateChanged(auth, (u) => { setUser(u); });
           } catch (err) {
             console.error(err);
@@ -271,7 +275,7 @@
     }
 
     // ==========================================
-    // 2. REGISTER VIEW (ปรับขนาดกล้องให้กว้าง 4:3 และใหญ่จุใจ)
+    // 2. REGISTER VIEW
     // ==========================================
     function RegisterView({ db, goHome }) {
       const [step, setStep] = useState(1); 
@@ -413,7 +417,6 @@
                 {step === 2 ? "กรุณาหันหน้าตรงและกดถ่ายรูป" : step === 3 ? "กรุณาหันหน้าไปทางซ้ายเล็กน้อย" : "กรุณาหันหน้าไปทางขวาเล็กน้อย"}
               </p>
               
-              {/* ปรับขนาดเฟรมกล้องให้กว้างขึ้นด้วย max-w-lg และความสูงสมดุลด้วย aspect-[4/3] */}
               <div className="relative w-full max-w-lg aspect-[4/3] bg-[#0a0f24] rounded-2xl overflow-hidden mb-6 border border-white/10 shadow-inner">
                 <video ref={videoRef} autoPlay muted playsInline className="w-full h-full object-cover scale-x-[-1]" />
                 <div className="absolute inset-0 border-4 border-dashed border-white/40 m-12 rounded-full pointer-events-none"></div>
@@ -441,7 +444,7 @@
     }
 
     // ==========================================
-    // 3. CHECK-IN VIEW (ปรับขนาดกล้องให้กว้างพิเศษ 4:3 และขนาด max-w-lg)
+    // 3. CHECK-IN VIEW (REAL-TIME AUTO SCAN & FAST GPS)
     // ==========================================
     function CheckInView({ db, checkInType, goHome }) {
       const [step, setStep] = useState('location'); 
@@ -450,6 +453,7 @@
       const [isProcessing, setIsProcessing] = useState(false);
       const [matchData, setMatchData] = useState(null);
       const [autoScanStatus, setAutoScanStatus] = useState('สแกนเนอร์กำลังค้นหาใบหน้า...');
+      const [matchedLocation, setMatchedLocation] = useState(''); // เก็บชื่อสถานที่
       const videoRef = useRef(null);
       const scanIntervalRef = useRef(null);
       const isAnalyzingRef = useRef(false);
@@ -507,20 +511,28 @@
           navigator.geolocation.getCurrentPosition(
             (pos) => {
               const { latitude, longitude } = pos.coords;
-              let isAllowed = false, minDistance = Infinity;
+              let isAllowed = false, minDistance = Infinity, matchedLocName = '';
 
               for (const loc of activeLocations) {
                 const distance = getDistance(latitude, longitude, loc.lat, loc.lng);
                 if (distance < minDistance) minDistance = distance;
-                if (distance <= loc.radius) { isAllowed = true; break; }
+                if (distance <= loc.radius) { 
+                  isAllowed = true; 
+                  matchedLocName = loc.name;
+                  break; 
+                }
               }
 
               if (activeLocations.length === 0) {
                 minDistance = getDistance(latitude, longitude, WORKPLACE_LAT, WORKPLACE_LON);
-                if (minDistance <= ALLOWED_RADIUS_METERS) isAllowed = true;
+                if (minDistance <= ALLOWED_RADIUS_METERS) {
+                  isAllowed = true;
+                  matchedLocName = 'พิกัดเริ่มต้น (โรงพยาบาล)';
+                }
               }
 
               if (isAllowed) { 
+                setMatchedLocation(matchedLocName);
                 setStep('camera'); 
               } else {
                 setError(`คุณอยู่นอกพื้นที่เช็คอินปฏิบัติงาน (ห่างจากจุดที่ใกล้ที่สุดประมาณ ${Math.round(minDistance)} เมตร)`);
@@ -584,7 +596,7 @@
             }
           });
 
-          const faceMatcher = new window.faceapi.FaceMatcher(labeledDescriptors, 0.40); 
+          const faceMatcher = new window.faceapi.FaceMatcher(labeledDescriptors, 0.45); 
           const bestMatch = faceMatcher.findBestMatch(detection.descriptor);
 
           if (bestMatch.label === 'unknown') {
@@ -605,9 +617,13 @@
           const { doc, setDoc, collection } = window.FirebaseUtils;
           const logId = Date.now().toString();
           await setDoc(doc(collection(db, 'artifacts', APP_ID, 'public', 'data', 'attendance_logs'), logId), {
-            empId, name, timestamp: new Date().toISOString(), type: checkInType
+            empId, 
+            name, 
+            timestamp: new Date().toISOString(), 
+            type: checkInType,
+            locationName: matchedLocation // บันทึกชื่อสถานที่ลงฐานข้อมูล
           });
-          setMatchData({ empId, name }); 
+          setMatchData({ empId, name, locationName: matchedLocation }); 
           stopCamera(); 
           setStep('success');
         } catch (err) { setError('บันทึกประวัติล้มเหลว'); }
@@ -653,7 +669,6 @@
                 <span>Auto Scanner</span>
               </div>
               
-              {/* ปรับขนาดกล้องให้แสดงผลกว้างสะใจแบบ max-w-lg และสัดส่วน 4:3 เหมือนหน้าลงทะเบียน */}
               <div className="relative w-full max-w-lg aspect-[4/3] bg-[#0a0f24] rounded-2xl overflow-hidden mb-5 border border-white/5 shadow-inner">
                 <video ref={videoRef} autoPlay muted playsInline className="w-full h-full object-cover scale-x-[-1]" />
                 <div className={`absolute inset-0 border-4 border-dashed border-${theme.color}-400/40 m-12 rounded-[3rem] pointer-events-none animate-pulse`}></div>
@@ -676,6 +691,7 @@
               <div className="bg-[#0a0f24] border border-white/10 rounded-xl p-5 inline-block mb-8 text-left min-w-[280px]">
                 <p className="text-sm text-gray-400 mb-1.5">รหัสประจำตัว: <span className="font-bold text-white text-base ml-2">{matchData.empId}</span></p>
                 <p className="text-sm text-gray-400 mb-1.5">ชื่อ: <span className="font-bold text-white text-base ml-2">{matchData.name}</span></p>
+                <p className="text-sm text-gray-400 mb-1.5">สถานที่: <span className="font-bold text-blue-400 text-base ml-2">{matchData.locationName}</span></p>
                 <p className="text-sm text-gray-400 mb-1.5">ประเภท: <span className={`font-bold text-${theme.color}-400 text-base ml-2`}>{theme.text}</span></p>
                 <p className="text-sm text-gray-400 mt-3 pt-3 border-t border-white/10 flex items-center gap-2">
                   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor" className="w-4 h-4 text-gray-400"><path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
@@ -745,11 +761,12 @@
 
       const exportCSV = () => {
         if (filteredLogs.length === 0) return;
-        const headers = ['รหัสประจำตัว', 'ชื่อ-นามสกุล', 'วันที่', 'เวลา', 'ประเภท'];
+        const headers = ['รหัสประจำตัว', 'ชื่อ-นามสกุล', 'สถานที่', 'วันที่', 'เวลา', 'ประเภท'];
         const csvRows = [headers.join(',')];
         filteredLogs.forEach(log => {
           const d = new Date(log.timestamp);
-          csvRows.push([`"${log.empId}"`, `"${log.name}"`, `"${d.toLocaleDateString('th-TH')}"`, `"${d.toLocaleTimeString('th-TH')}"`, `"${getTypeText(log.type)}"`].join(','));
+          const locName = log.locationName || 'ไม่ระบุพิกัด';
+          csvRows.push([`"${log.empId}"`, `"${log.name}"`, `"${locName}"`, `"${d.toLocaleDateString('th-TH')}"`, `"${d.toLocaleTimeString('th-TH')}"`, `"${getTypeText(log.type)}"`].join(','));
         });
         const blob = new Blob(['\uFEFF' + csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
         const link = document.createElement('a');
@@ -798,6 +815,7 @@
                       <th className="p-4 w-16 text-center">ลำดับ</th>
                       <th className="p-4">รหัสประจำตัว</th>
                       <th className="p-4">ชื่อ-สกุล</th>
+                      <th className="p-4">สถานที่</th>
                       <th className="p-4">วันปฏิบัติงาน/เวลา</th>
                       <th className="p-4 text-center">ประเภท</th>
                     </tr>
@@ -808,6 +826,7 @@
                         <td className="p-4 text-center text-gray-500">{index + 1}</td>
                         <td className="p-4 font-semibold text-gray-200">{log.empId}</td>
                         <td className="p-4 text-gray-300">{log.name}</td>
+                        <td className="p-4 text-blue-300">{log.locationName || '-'}</td>
                         <td className="p-4 text-gray-400">{new Date(log.timestamp).toLocaleString('th-TH')}</td>
                         <td className="p-4 text-center">
                           <span className={`px-3 py-1 rounded-full text-xs font-bold border ${getTypeStyle(log.type)}`}>
@@ -936,6 +955,9 @@
       const [pinSuccess, setPinSuccess] = useState('');
       const [studentSearch, setStudentSearch] = useState('');
 
+      // Custom Confirmation Modal states to replace standard window.confirm in IFrames
+      const [confirmModal, setConfirmModal] = useState({ isOpen: false, type: '', targetId: '', targetName: '' });
+
       const fetchLocs = async () => {
         try {
           const { collection, getDocs } = window.FirebaseUtils;
@@ -987,22 +1009,31 @@
         } catch(e) { setError('บันทึกไม่ได้ เนื่องจากสิทธิ์การเข้าถึงฐานข้อมูลจำกัด'); }
       };
 
-      const handleDel = async (id) => {
-        if(!window.confirm('ยืนยันการลบสถานที่นี้?')) return;
-        try {
-          const { doc, deleteDoc } = window.FirebaseUtils;
-          await deleteDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'locations', id));
-          fetchLocs();
-        } catch(e) { setError('ลบไม่ได้ เนื่องจากสิทธิ์การเข้าถึงฐานข้อมูลจำกัด'); }
+      // ฟังก์ชันเรียกเปิดกล่องแจ้งเตือนสำหรับการลบ
+      const triggerDeleteLoc = (id, name) => {
+        setConfirmModal({ isOpen: true, type: 'location', targetId: id, targetName: name });
       };
 
-      const handleDeleteStudent = async (empId) => {
-        if(!window.confirm(`ยืนยันการลบข้อมูลของนักศึกษาและไฟล์บันทึกใบหน้าของรหัส "${empId}"? (การลบนี้จะทำให้นักศึกษาสามารถลงทะเบียนใบหน้าใหม่ได้)`)) return;
+      const triggerDeleteStudent = (id, name) => {
+        setConfirmModal({ isOpen: true, type: 'student', targetId: id, targetName: name });
+      };
+
+      const executeDelete = async () => {
+        const { targetId, type } = confirmModal;
+        setConfirmModal({ isOpen: false, type: '', targetId: '', targetName: '' });
+        
         try {
           const { doc, deleteDoc } = window.FirebaseUtils;
-          await deleteDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'employees', empId));
-          fetchStudents();
-        } catch(e) { setError('ไม่สามารถลบข้อมูลนักศึกษาได้'); }
+          if (type === 'location') {
+            await deleteDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'locations', targetId));
+            await fetchLocs();
+          } else if (type === 'student') {
+            await deleteDoc(doc(db, 'artifacts', APP_ID, 'public', 'data', 'employees', targetId));
+            await fetchStudents();
+          }
+        } catch (e) {
+          setError('การลบข้อมูลล้มเหลว เนื่องจากข้อจำกัดสิทธิ์ในระบบ');
+        }
       };
 
       const handleUpdatePin = async (e) => {
@@ -1028,7 +1059,30 @@
       );
 
       return (
-        <div className="bg-[#151c33]/80 border border-white/10 rounded-3xl shadow-xl overflow-hidden max-w-4xl mx-auto backdrop-blur-md">
+        <div className="bg-[#151c33]/80 border border-white/10 rounded-3xl shadow-xl overflow-hidden max-w-4xl mx-auto backdrop-blur-md relative">
+          
+          {/* Custom Confirmation UI Modal */}
+          {confirmModal.isOpen && (
+            <div className="absolute inset-0 bg-black/80 flex items-center justify-center z-50 p-4 rounded-3xl backdrop-blur-sm">
+              <div className="bg-[#151c33] border border-white/10 rounded-2xl p-6 max-w-sm w-full text-center">
+                <svg className="w-12 h-12 text-red-500 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+                <h4 className="text-lg font-bold text-white mb-2">ยืนยันการลบข้อมูล?</h4>
+                <p className="text-sm text-gray-400 mb-6">
+                  {confirmModal.type === 'location' 
+                    ? `คุณแน่ใจหรือไม่ว่าต้องการลบพิกัดสถานที่ปฏิบัติงาน "${confirmModal.targetName}"?` 
+                    : `คุณแน่ใจหรือไม่ว่าต้องการลบข้อมูลสิทธิ์และโปรไฟล์ใบหน้าของรหัส "${confirmModal.targetId}" (${confirmModal.targetName})?`
+                  }
+                </p>
+                <div className="flex gap-2">
+                  <button onClick={executeDelete} className="flex-1 py-2.5 bg-red-600 hover:bg-red-500 text-white font-bold rounded-xl text-sm transition">ยืนยันการลบ</button>
+                  <button onClick={() => setConfirmModal({ isOpen: false, type: '', targetId: '', targetName: '' })} className="flex-1 py-2.5 bg-gray-700 hover:bg-gray-600 text-gray-200 rounded-xl text-sm transition">ยกเลิก</button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* แถบ Tab ในหน้า Admin */}
           <div className="flex border-b border-white/10 bg-black/10">
             <button 
@@ -1108,7 +1162,7 @@ service cloud.firestore {
                             <h4 className="text-gray-200 font-bold">{loc.name}</h4>
                             <div className="text-xs text-gray-500 mt-1">Lat: {Number(loc.lat).toFixed(4)} | Lng: {Number(loc.lng).toFixed(4)} | รัศมี {loc.radius}m</div>
                           </div>
-                          <button onClick={()=>handleDel(loc.id)} className="p-2.5 bg-red-500/10 text-red-400 hover:bg-red-500/20 rounded-xl transition">
+                          <button onClick={()=>triggerDeleteLoc(loc.id, loc.name)} className="p-2.5 bg-red-500/10 text-red-400 hover:bg-red-500/20 rounded-xl transition">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" /></svg>
                           </button>
                         </div>
@@ -1132,7 +1186,7 @@ service cloud.firestore {
                       value={studentSearch}
                       onChange={e => setStudentSearch(e.target.value)}
                     />
-                    <svg className="w-3.5 h-3.5 text-gray-500 absolute left-3 top-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                    <svg className="w-3.5 h-3.5 text-gray-500 absolute left-3 top-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
                   </div>
                 </div>
 
@@ -1157,7 +1211,7 @@ service cloud.firestore {
                             <td className="p-4 text-gray-400">{new Date(student.registeredAt).toLocaleDateString('th-TH')}</td>
                             <td className="p-4 text-center">
                               <button 
-                                onClick={() => handleDeleteStudent(student.id)}
+                                onClick={() => triggerDeleteStudent(student.id, student.name)}
                                 className="px-3 py-1 bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500 hover:text-white rounded-lg text-xs transition"
                               >
                                 ลบใบหน้า / ย้ายสิทธิ์
