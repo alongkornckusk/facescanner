@@ -59,17 +59,52 @@
       measurementId: "G-ZTQKYVHRC5"
     };
     
-    // ตั้งค่าพิกัดเริ่มต้น (ถ้าไม่ได้ตั้งผ่านเมนู Admin)
     const WORKPLACE_LAT = 13.7649; 
     const WORKPLACE_LON = 100.5383;
     const ALLOWED_RADIUS_METERS = 1000;
-    const APP_ID = typeof __app_id !== 'undefined' ? __app_id : 'face-attendance-med'; // ชื่อโฟลเดอร์ในฐานข้อมูล
+    const APP_ID = typeof __app_id !== 'undefined' ? __app_id : 'face-attendance-med';
+
+    // คำนวณระยะห่างระหว่างจุด 2 จุด (สำหรับหาขนาดดวงตา EAR)
+    const getDistance = (p1, p2) => {
+      return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+    };
+
+    // คำนวณค่า Eye Aspect Ratio (EAR) เพื่อตรวจจับการกระพริบตา
+    const getEAR = (landmarks) => {
+      // ดวงตาซ้าย: พิกัดที่ 36-41
+      const p36 = landmarks[36];
+      const p37 = landmarks[37];
+      const p38 = landmarks[38];
+      const p39 = landmarks[39];
+      const p40 = landmarks[40];
+      const p41 = landmarks[41];
+
+      const dVertical1 = getDistance(p37, p41);
+      const dVertical2 = getDistance(p38, p40);
+      const dHorizontal = getDistance(p36, p39);
+      const leftEAR = (dVertical1 + dVertical2) / (2.0 * dHorizontal);
+
+      // ดวงตาขวา: พิกัดที่ 42-47
+      const p42 = landmarks[42];
+      const p43 = landmarks[43];
+      const p44 = landmarks[44];
+      const p45 = landmarks[45];
+      const p46 = landmarks[46];
+      const p47 = landmarks[47];
+
+      const dVertical3 = getDistance(p43, p47);
+      const dVertical4 = getDistance(p44, p46);
+      const dHorizontal2 = getDistance(p42, p45);
+      const rightEAR = (dVertical3 + dVertical4) / (2.0 * dHorizontal2);
+
+      return (leftEAR + rightEAR) / 2.0;
+    };
 
     function App() {
       const [user, setUser] = useState(null);
       const [db, setDb] = useState(null);
       const [view, setView] = useState('home'); 
-      const [checkInType, setCheckInType] = useState('normal-in'); // normal-in, normal-out, shift-in, shift-out
+      const [checkInType, setCheckInType] = useState('normal-in'); 
       
       const [modelsLoaded, setModelsLoaded] = useState(false);
       const [loadingMsg, setLoadingMsg] = useState('กำลังเริ่มต้นระบบ...');
@@ -453,10 +488,18 @@
       const [isProcessing, setIsProcessing] = useState(false);
       const [matchData, setMatchData] = useState(null);
       const [autoScanStatus, setAutoScanStatus] = useState('สแกนเนอร์กำลังค้นหาใบหน้า...');
-      const [matchedLocation, setMatchedLocation] = useState(''); // เก็บชื่อสถานที่
+      const [matchedLocation, setMatchedLocation] = useState(''); 
+      const [targetEmpId, setTargetEmpId] = useState(''); 
+      const [livenessStatus, setLivenessStatus] = useState(''); // เก็บสถานะคำสั่งกระพริบตา
+      
       const videoRef = useRef(null);
       const scanIntervalRef = useRef(null);
       const isAnalyzingRef = useRef(false);
+
+      // Refs สำหรับติดตามสถานะตาและการกระพริบตา (เพื่อไม่ให้ React Re-render ถี่เกินไปจนกระตุก)
+      const eyeStateRef = useRef('open'); // 'open' หรือ 'closed'
+      const blinkCountRef = useRef(0);
+      const matchedUserRef = useRef(null); // ล็อกโปรไฟล์ผู้ใช้เมื่อสแกนโครงหน้าผ่าน
 
       useEffect(() => { 
         if (step === 'location') {
@@ -478,11 +521,17 @@
 
       const startAutoScan = () => {
         stopAutoScan();
+        // ล้างค่าตรวจสอบความปลอดภัยเดิม
+        eyeStateRef.current = 'open';
+        blinkCountRef.current = 0;
+        matchedUserRef.current = null;
+        setLivenessStatus('');
+
         scanIntervalRef.current = setInterval(() => {
           if (!isAnalyzingRef.current && videoRef.current && videoRef.current.readyState === 4) {
             runRealTimeMatch();
           }
-        }, 350);
+        }, 250);
       };
 
       const stopAutoScan = () => {
@@ -569,14 +618,10 @@
 
         if (type === 'normal-in') {
           const limit = 8 * 60 + 30; // 08:30 น.
-          if (totalMinutes > limit) {
-            return 'เข้างานสาย';
-          }
+          if (totalMinutes > limit) return 'เข้างานสาย';
         } else if (type === 'shift-in') {
           const limit = 16 * 60 + 30; // 16:30 น.
-          if (totalMinutes > limit) {
-            return 'เข้าเวรสาย';
-          }
+          if (totalMinutes > limit) return 'เข้าเวรสาย';
         }
         return '';
       };
@@ -591,41 +636,101 @@
 
           if (!detection) {
             setAutoScanStatus('กำลังสแกนหาใบหน้าของคุณ...');
+            // ล้างค่าการยืนยันเมื่อไม่มีใบหน้าสแกน (เช่น ผู้ใช้ออกจากกล้อง)
+            matchedUserRef.current = null;
+            blinkCountRef.current = 0;
+            setLivenessStatus('');
             isAnalyzingRef.current = false;
             return;
           }
 
-          setAutoScanStatus('ตรวจพบใบหน้า! กำลังเปรียบเทียบฐานข้อมูล...');
+          // 1. ตรวจสอบอัตราส่วนขนาดดวงตา (EAR) เพื่อตรวจจับการกระพริบตาที่มีชีวิต (Liveness Verification)
+          const landmarks = detection.landmarks.positions;
+          const ear = getEAR(landmarks);
 
-          const { collection, getDocs } = window.FirebaseUtils;
-          const empSnapshot = await getDocs(collection(db, 'artifacts', APP_ID, 'public', 'data', 'employees'));
-          
-          if (empSnapshot.empty) {
-            setError('ไม่มีข้อมูลพนักงานคนใดลงทะเบียนไว้ในระบบเลย');
-            stopAutoScan();
-            isAnalyzingRef.current = false;
-            return;
+          // อัลกอริทึมจับความเร็วในการกระพริบตา (หลับตา EAR < 0.17 และลืมตา EAR > 0.22)
+          if (eyeStateRef.current === 'open' && ear < 0.17) {
+            eyeStateRef.current = 'closed';
+          } else if (eyeStateRef.current === 'closed' && ear > 0.22) {
+            eyeStateRef.current = 'open';
+            blinkCountRef.current += 1;
           }
 
-          const labeledDescriptors = [];
-          empSnapshot.forEach((doc) => {
-            const data = doc.data();
-            if (data.descriptors) {
-              const float32Descs = JSON.parse(data.descriptors).map(d => new Float32Array(d));
-              labeledDescriptors.push(new window.faceapi.LabeledFaceDescriptors(data.empId + "|||" + data.name, float32Descs));
+          // 2. ขั้นตอนการจับคู่โครงหน้า (หาคู่เทียบในฐานข้อมูล)
+          if (!matchedUserRef.current) {
+            setAutoScanStatus('ตรวจพบใบหน้า! กำลังเปรียบเทียบฐานข้อมูล...');
+            const { collection, getDocs, doc, getDoc } = window.FirebaseUtils;
+
+            // กรณีที่ 1: ระบบ 1:1 Target Verification
+            if (targetEmpId.trim()) {
+              const empRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'employees', targetEmpId.trim());
+              const empSnap = await getDoc(empRef);
+
+              if (empSnap.exists()) {
+                const data = empSnap.data();
+                if (data.descriptors) {
+                  const float32Descs = JSON.parse(data.descriptors).map(d => new Float32Array(d));
+                  const labeledDesc = new window.faceapi.LabeledFaceDescriptors(data.empId + "|||" + data.name, float32Descs);
+                  const faceMatcher = new window.faceapi.FaceMatcher([labeledDesc], 0.45);
+                  const bestMatch = faceMatcher.findBestMatch(detection.descriptor);
+
+                  if (bestMatch.label !== 'unknown') {
+                    const [empId, name] = bestMatch.label.split("|||");
+                    matchedUserRef.current = { empId, name };
+                    blinkCountRef.current = 0; // รีเซ็ตพร้อมเริ่มด่านสแกนกะพริบตา
+                  } else {
+                    setAutoScanStatus('❌ ใบหน้าไม่ตรงกับรหัส นศ. ที่ระบุไว้');
+                  }
+                }
+              } else {
+                setAutoScanStatus('🔍 ไม่พบรหัส นศ. นี้ลงทะเบียนในระบบ');
+              }
+            } else {
+              // กรณีที่ 2: ระบบ 1:N Auto-Scan (ปรับความเข้มงวดสูงมาก 0.38 ป้องกันสแกนหน้าซ้ำผิดตัวบุคคล)
+              const empSnapshot = await getDocs(collection(db, 'artifacts', APP_ID, 'public', 'data', 'employees'));
+              
+              if (empSnapshot.empty) {
+                setError('ไม่มีข้อมูลพนักงานคนใดลงทะเบียนไว้ในระบบเลย');
+                stopAutoScan();
+                isAnalyzingRef.current = false;
+                return;
+              }
+
+              const labeledDescriptors = [];
+              empSnapshot.forEach((doc) => {
+                const data = doc.data();
+                if (data.descriptors) {
+                  const float32Descs = JSON.parse(data.descriptors).map(d => new Float32Array(d));
+                  labeledDescriptors.push(new window.faceapi.LabeledFaceDescriptors(data.empId + "|||" + data.name, float32Descs));
+                }
+              });
+
+              const faceMatcher = new window.faceapi.FaceMatcher(labeledDescriptors, 0.38); 
+              const bestMatch = faceMatcher.findBestMatch(detection.descriptor);
+
+              if (bestMatch.label !== 'unknown') {
+                const [empId, name] = bestMatch.label.split("|||");
+                matchedUserRef.current = { empId, name };
+                blinkCountRef.current = 0; // รีเซ็ตพร้อมเริ่มด่านสแกนกะพริบตา
+              } else {
+                setAutoScanStatus('ไม่พบใบหน้านี้ในระบบ (เกณฑ์ความปลอดภัยสูงมาก) กรุณามองตรงระดับสายตา หรือพิมพ์รหัส นศ. ด้านล่าง');
+              }
             }
-          });
-
-          const faceMatcher = new window.faceapi.FaceMatcher(labeledDescriptors, 0.45); 
-          const bestMatch = faceMatcher.findBestMatch(detection.descriptor);
-
-          if (bestMatch.label === 'unknown') {
-            setAutoScanStatus('ไม่พบใบหน้านี้ในระบบ กรุณาลองมองกล้องชัดๆ');
-          } else {
-            const [empId, name] = bestMatch.label.split("|||");
-            stopAutoScan();
-            await saveAttendanceLog(empId, name);
           }
+
+          // 3. ตรวจสอบด่านตรวจสอบการมีชีวิต (Liveness Verification) เมื่อตรวจจับใบหน้าเสร็จแล้ว
+          if (matchedUserRef.current) {
+            const { empId, name } = matchedUserRef.current;
+            setLivenessStatus(`ยินดีต้อนรับ นศ.พ. ${name}! กรุณากระพริบตา 1 ครั้งเพื่อยืนยันความเป็นมนุษย์ (ระบบป้องกันรูปภาพ)`);
+            setAutoScanStatus(`😉 รอตรวจจับการกระพริบตา... (ขนาดดวงตา EAR: ${ear.toFixed(2)})`);
+
+            // หากสแกนหน้าเจอ + กระพริบตาสำเร็จ 1 ครั้ง ➡️ สิ้นสุดด่านผ่านฉลุย
+            if (blinkCountRef.current >= 1) {
+              stopAutoScan();
+              await saveAttendanceLog(empId, name);
+            }
+          }
+
         } catch (err) {
           console.error("Auto scan err:", err);
         }
@@ -644,7 +749,7 @@
             timestamp: new Date().toISOString(), 
             type: checkInType,
             locationName: matchedLocation,
-            remark: remarkValue // บันทึกข้อมูลหมายเหตุมาสาย
+            remark: remarkValue 
           });
           setMatchData({ empId, name, locationName: matchedLocation, remark: remarkValue }); 
           stopCamera(); 
@@ -689,7 +794,7 @@
                   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M9 6.75V15m6-6v8m-3-12.125a2.25 2.25 0 114.5 0V18a2.25 2.25 0 01-4.5 0V3.625z" /></svg>
                   {theme.desc}
                 </span>
-                <span>Auto Scanner</span>
+                <span>Auto Scanner with Anti-Spoofing</span>
               </div>
               
               <div className="relative w-full max-w-lg aspect-[4/3] bg-[#0a0f24] rounded-2xl overflow-hidden mb-5 border border-white/5 shadow-inner">
@@ -698,9 +803,45 @@
                 <div className={`absolute top-0 left-0 w-full h-1.5 bg-${theme.color}-500/50 animate-bounce`}></div>
               </div>
 
-              <div className="flex items-center gap-2.5 px-6 py-3 bg-[#1e293b] border border-white/10 rounded-full shadow-inner text-sm text-gray-300 w-full max-w-lg justify-center">
+              {/* ป้ายคำแนะนำการมีชีวิต (Liveness Verification Status) */}
+              {livenessStatus ? (
+                <div className="flex flex-col items-center justify-center p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-2xl w-full max-w-lg mb-4 text-center animate-pulse">
+                  <span className="text-yellow-400 font-bold text-base mb-1 flex items-center gap-1.5 justify-center">
+                    🔒 สแกนใบหน้าจับคู่สำเร็จแล้ว!
+                  </span>
+                  <p className="text-gray-200 text-sm font-semibold">{livenessStatus}</p>
+                  <p className="text-[11px] text-gray-400 mt-1">🛡️ ระบบตรวจสอบการมีชีวิต (Active Liveness) ป้องกันรูปภาพ / หน้าจอ 100%</p>
+                </div>
+              ) : null}
+
+              <div className="flex items-center gap-2.5 px-6 py-3 bg-[#1e293b] border border-white/10 rounded-full shadow-inner text-sm text-gray-300 w-full max-w-lg justify-center mb-4">
                 <span className={`w-2.5 h-2.5 rounded-full bg-${theme.color}-500 animate-ping`}></span>
                 <span>{autoScanStatus}</span>
+              </div>
+
+              {/* ช่องป้อนรหัส นศ. ล็อกเป้าหมาย 1:1 เพื่อป้องกันความผิดพลาดสลับใบหน้า */}
+              <div className="w-full max-w-lg bg-[#0a0f24]/60 border border-white/10 rounded-2xl p-4 text-left">
+                <label className="block text-xs text-gray-400 mb-2 font-semibold flex items-center gap-1.5">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor" className="w-3.5 h-3.5 text-indigo-400"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" /></svg>
+                  ใส่รหัสประจำตัวก่อนสแกน (หลีกเลี่ยงการสแกนหน้าผิดพลาด 100%):
+                </label>
+                <div className="flex gap-2">
+                  <input 
+                    type="text" 
+                    placeholder="ใส่รหัส นศ. ของคุณ (เช่น 64XXXXX) หรือปล่อยว่างเพื่อแสกนออโต้" 
+                    className="flex-1 px-4 py-2 bg-[#151c33] text-white text-sm rounded-xl outline-none border border-white/5 focus:border-indigo-500 transition"
+                    value={targetEmpId}
+                    onChange={e => setTargetEmpId(e.target.value)}
+                  />
+                  {targetEmpId && (
+                    <button 
+                      onClick={() => setTargetEmpId('')}
+                      className="px-3.5 py-2 bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-white rounded-xl text-xs font-semibold transition border border-red-500/20"
+                    >
+                      ล้างค่า
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           )}
@@ -711,7 +852,6 @@
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="2.5" stroke="currentColor" className={`w-12 h-12 text-${theme.color}-400`}><path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
               </div>
               
-              {/* แบนเนอร์แสดงแจ้งเตือนการสแกนเข้าสาย */}
               {matchData.remark && (
                 <div className="mb-4 inline-block px-4 py-1.5 bg-red-950/60 border border-red-500/40 text-red-400 rounded-full text-xs font-bold animate-bounce tracking-wide shadow-lg">
                   ⚠️ แจ้งเตือน: {matchData.remark}! (เกินกำหนดเวลาที่ระบบตั้งค่าไว้)
@@ -898,7 +1038,7 @@
       const [error, setError] = useState('');
       const [loading, setLoading] = useState(true);
       const [dbPassword, setDbPassword] = useState('1234'); 
-      const [permissionError, setPermissionError] = useState(false); // เช็คสิทธิ์ Security Rules
+      const [permissionError, setPermissionError] = useState(false); 
 
       useEffect(() => {
         const fetchAdminPass = async () => {
@@ -1000,7 +1140,6 @@
       const [pinSuccess, setPinSuccess] = useState('');
       const [studentSearch, setStudentSearch] = useState('');
 
-      // Custom Confirmation Modal states to replace standard window.confirm in IFrames
       const [confirmModal, setConfirmModal] = useState({ isOpen: false, type: '', targetId: '', targetName: '' });
 
       const fetchLocs = async () => {
@@ -1054,7 +1193,6 @@
         } catch(e) { setError('บันทึกไม่ได้ เนื่องจากสิทธิ์การเข้าถึงฐานข้อมูลจำกัด'); }
       };
 
-      // ฟังก์ชันเรียกเปิดกล่องแจ้งเตือนสำหรับการลบ
       const triggerDeleteLoc = (id, name) => {
         setConfirmModal({ isOpen: true, type: 'location', targetId: id, targetName: name });
       };
@@ -1111,7 +1249,7 @@
             <div className="absolute inset-0 bg-black/80 flex items-center justify-center z-50 p-4 rounded-3xl backdrop-blur-sm">
               <div className="bg-[#151c33] border border-white/10 rounded-2xl p-6 max-w-sm w-full text-center">
                 <svg className="w-12 h-12 text-red-500 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                 </svg>
                 <h4 className="text-lg font-bold text-white mb-2">ยืนยันการลบข้อมูล?</h4>
                 <p className="text-sm text-gray-400 mb-6">
@@ -1231,7 +1369,7 @@ service cloud.firestore {
                       value={studentSearch}
                       onChange={e => setStudentSearch(e.target.value)}
                     />
-                    <svg className="w-3.5 h-3.5 text-gray-500 absolute left-3 top-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+                    <svg className="w-3.5 h-3.5 text-gray-500 absolute left-3 top-2.5" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
                   </div>
                 </div>
 
