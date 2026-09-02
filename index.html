@@ -591,8 +591,8 @@
         try {
           // ตัวเลือกการสแกนความเร็วสูง
           const detectorOptions = new window.faceapi.TinyFaceDetectorOptions({ 
-            inputSize: 224, 
-            scoreThreshold: 0.5 
+            inputSize: 320, 
+            scoreThreshold: 0.2 
           });
 
           const detection = await window.faceapi
