@@ -32,11 +32,11 @@
   <!-- โหลด Firebase Modules -->
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-    import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
     import { getFirestore, collection, getDocs, doc, setDoc, getDoc, deleteDoc, addDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
     window.FirebaseUtils = {
-      initializeApp, getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken,
+      initializeApp, getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken, signInWithEmailAndPassword, signOut,
       getFirestore, collection, getDocs, doc, setDoc, getDoc, deleteDoc, addDoc
     };
     window.dispatchEvent(new Event('firebaseLoaded'));
@@ -454,6 +454,7 @@
       const [matchData, setMatchData] = useState(null);
       const [autoScanStatus, setAutoScanStatus] = useState('สแกนเนอร์กำลังค้นหาใบหน้า...');
       const [matchedLocation, setMatchedLocation] = useState(''); // เก็บชื่อสถานที่
+      const [rawLocation, setRawLocation] = useState({ lat: null, lng: null });
       const videoRef = useRef(null);
       const scanIntervalRef = useRef(null);
       const isAnalyzingRef = useRef(false);
@@ -511,6 +512,7 @@
           navigator.geolocation.getCurrentPosition(
             (pos) => {
               const { latitude, longitude } = pos.coords;
+              setRawLocation({ lat: latitude, lng: longitude }); // <--- เพิ่มบรรทัดนี้
               let isAllowed = false, minDistance = Infinity, matchedLocName = '';
 
               for (const loc of activeLocations) {
@@ -644,7 +646,9 @@
             timestamp: new Date().toISOString(), 
             type: checkInType,
             locationName: matchedLocation,
-            remark: remarkValue // บันทึกข้อมูลหมายเหตุมาสาย
+            latitude: rawLocation.lat,   // <--- เพิ่มบรรทัดนี้
+            longitude: rawLocation.lng,  // <--- เพิ่มบรรทัดนี้
+            remark: remarkValue 
           });
           setMatchData({ empId, name, locationName: matchedLocation, remark: remarkValue }); 
           stopCamera(); 
@@ -892,55 +896,31 @@
     // ==========================================
     // 5. ADMIN GATE VIEW (ADMIN PASSCODE LOCK)
     // ==========================================
-    function AdminGateView({ db, goHome }) {
+   function AdminGateView({ db, goHome }) {
       const [isAuthorized, setIsAuthorized] = useState(false);
+      const [email, setEmail] = useState('');
       const [password, setPassword] = useState('');
       const [error, setError] = useState('');
-      const [loading, setLoading] = useState(true);
-      const [dbPassword, setDbPassword] = useState('1234'); 
-      const [permissionError, setPermissionError] = useState(false); // เช็คสิทธิ์ Security Rules
+      const [isProcessing, setIsProcessing] = useState(false);
 
-      useEffect(() => {
-        const fetchAdminPass = async () => {
-          try {
-            const { doc, getDoc } = window.FirebaseUtils;
-            const configRef = doc(db, 'artifacts', APP_ID, 'public', 'data', 'admin_config', 'security');
-            const snap = await getDoc(configRef);
-            if (snap.exists() && snap.data().pin) {
-              setDbPassword(snap.data().pin);
-            }
-          } catch (e) {
-            console.error("Fetch admin pass error:", e);
-            if (e.message && (e.message.toLowerCase().includes("permission") || e.message.toLowerCase().includes("denied"))) {
-              setPermissionError(true);
-            }
-          }
-          setLoading(false);
-        };
-        fetchAdminPass();
-      }, [db]);
-
-      const handleLogin = (e) => {
+      const handleLogin = async (e) => {
         e.preventDefault();
-        if (password === dbPassword) {
+        setIsProcessing(true);
+        setError('');
+        try {
+          const { getAuth, signInWithEmailAndPassword } = window.FirebaseUtils;
+          const auth = getAuth();
+          await signInWithEmailAndPassword(auth, email, password);
           setIsAuthorized(true);
-          setError('');
-        } else {
-          setError('รหัสผ่านสำหรับแอดมินไม่ถูกต้อง!');
+        } catch (err) {
+          setError('อีเมลหรือรหัสผ่านสำหรับแอดมินไม่ถูกต้อง!');
           setPassword('');
         }
+        setIsProcessing(false);
       };
 
-      if (loading) {
-        return (
-          <div className="bg-[#151c33]/80 border border-white/10 rounded-3xl p-8 max-w-md mx-auto text-center">
-            <p className="text-gray-400">กำลังดาวน์โหลดระบบความปลอดภัย...</p>
-          </div>
-        );
-      }
-
       if (isAuthorized) {
-        return <AdminLocationView db={db} dbPassword={dbPassword} setDbPassword={setDbPassword} permissionError={permissionError} />;
+        return <AdminLocationView db={db} />;
       }
 
       return (
@@ -950,29 +930,30 @@
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.8" stroke="currentColor" className="w-8 h-8 text-red-400"><path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" /></svg>
             </div>
             <h3 className="text-xl font-bold text-white mb-2">พื้นที่สำหรับแอดมิน</h3>
-            <p className="text-gray-400 text-xs">กรุณากรอกรหัสผ่านเพื่อเข้าสู่โหมดการตั้งค่า</p>
+            <p className="text-gray-400 text-xs">กรุณาเข้าสู่ระบบด้วยบัญชีผู้ดูแล</p>
           </div>
-
-          {permissionError && (
-            <div className="p-3.5 bg-yellow-950/40 border border-yellow-500/30 text-yellow-400 rounded-xl text-xs mb-4 text-left leading-relaxed">
-              ⚠️ <b>แจ้งเตือนปัญหาด้านสิทธิ์ Firebase:</b><br />
-              ตรวจพบว่าสิทธิ์การอ่านเขียนของ Firebase โครงการของคุณหมดอายุหรือจำกัดสิทธิ์ไว้ คุณสามารถล็อกอินด้วยรหัสผ่านเริ่มต้น <b>"1234"</b> เพื่อเข้าดูหน้าตั้งค่าได้ก่อนชั่วคราว
-            </div>
-          )}
 
           {error && <div className="p-3 bg-red-950/40 border border-red-500/30 text-red-400 rounded-xl text-center text-xs mb-4">{error}</div>}
 
           <form onSubmit={handleLogin} className="space-y-4">
             <input 
+              type="email" 
+              className="w-full p-4 bg-[#0a0f24] border border-white/10 text-white rounded-xl text-sm outline-none focus:border-red-500 transition" 
+              placeholder="อีเมลผู้ดูแลระบบ"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              required
+            />
+            <input 
               type="password" 
-              className="w-full p-4 bg-[#0a0f24] border border-white/10 text-white rounded-xl text-center text-lg tracking-widest outline-none focus:border-red-500 transition" 
-              placeholder="••••"
-              maxLength={12}
+              className="w-full p-4 bg-[#0a0f24] border border-white/10 text-white rounded-xl text-sm outline-none focus:border-red-500 transition" 
+              placeholder="รหัสผ่าน"
               value={password}
               onChange={e => setPassword(e.target.value)}
+              required
             />
-            <button type="submit" className="w-full py-3 bg-red-600 hover:bg-red-500 text-white font-bold rounded-xl transition">
-              เข้าสู่หน้าตั้งค่าระบบ
+            <button type="submit" disabled={isProcessing} className="w-full py-3 bg-red-600 hover:bg-red-500 text-white font-bold rounded-xl transition">
+              {isProcessing ? 'กำลังตรวจสอบ...' : 'เข้าสู่หน้าตั้งค่าระบบ'}
             </button>
             <button type="button" onClick={goHome} className="w-full text-center text-xs text-gray-500 hover:text-gray-300">
               ยกเลิกและกลับหน้าหลัก
