@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ระบบบันทึกเวลาปฏิบัติงานด้วยใบหน้า (Updated System)</title>
+  <title>ระบบบันทึกเวลาปฏิบัติงานด้วยใบหน้า</title>
 
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -229,7 +229,7 @@
                 <div className="w-16 h-16 rounded-full border-4 border-indigo-500/30 border-t-indigo-500 animate-spin"></div>
                 <div className="absolute inset-0 flex items-center justify-center text-indigo-400 text-2xl font-bold">⚕️</div>
               </div>
-              <h2 className="text-lg font-bold mb-1">ระบบลงเวลาปฏิบัติงาน v2.5</h2>
+              <h2 className="text-lg font-bold mb-1">ระบบลงเวลาปฏิบัติงาน v2.0</h2>
               <p className="text-xs font-medium text-indigo-300 animate-pulse">{loadingMsg}</p>
             </div>
           </div>
@@ -381,7 +381,7 @@
             {}
             {recentLogs.length > 0 && (
               <div className="pt-2 border-t border-indigo-800/40">
-                <p className="text-[11px] font-bold text-indigo-300 mb-2">⚡ บันทึกล่าสุดสดๆ:</p>
+                <p className="text-[11px] font-bold text-indigo-300 mb-2">⚡ บันทึกล่าสุด:</p>
                 <div className="space-y-1.5">
                   {recentLogs.map((log, i) => (
                     <div key={i} className="flex justify-between items-center text-xs bg-slate-800/60 p-2 rounded-xl border border-slate-700/50">
