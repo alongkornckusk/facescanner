@@ -342,21 +342,27 @@
       };
 
       const captureFace = async (currentStep) => {
-        if (!videoRef.current) return;
+        if (!videoRef.current || isProcessing) return;
         setIsProcessing(true);
         setError('');
 
         try {
           await new Promise(r => setTimeout(r, 100));
 
+          // 1. กำหนดตัวเลือก TinyFaceDetector ขนาด 320 เพื่อการสแกนที่รวดเร็ว
+          const detectorOptions = new window.faceapi.TinyFaceDetectorOptions({ 
+            inputSize: 320, 
+            scoreThreshold: 0.2 
+          });
+
+          // 2. ใส่ detectorOptions เข้าไปในสั่ง detectSingleFace
           const detection = await window.faceapi
-            .detectSingleFace(videoRef.current)
+            .detectSingleFace(videoRef.current, detectorOptions)
             .withFaceLandmarks()
             .withFaceDescriptor();
 
           if (!detection) {
             setError('ไม่พบใบหน้าในเฟรมกล้อง กรุณามองที่กล้องตรงๆ และอยู่ในที่ที่มีแสงสว่างเพียงพอ');
-            setIsProcessing(false);
             return;
           }
 
@@ -373,10 +379,11 @@
         } catch (err) {
           console.error("Scanning Error: ", err);
           setError('เกิดข้อผิดพลาดในการประมวลผลใบหน้า: ' + err.message);
+        } finally {
+          // คืนค่าสถานะประมวลผลเสมอ ป้องกันปุ่มค้าง
+          setIsProcessing(false);
         }
-        setIsProcessing(false);
       };
-
       const saveEmployee = async (finalDescriptors) => {
         try {
           const { doc, setDoc } = window.FirebaseUtils;
