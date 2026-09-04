@@ -102,16 +102,25 @@
         }
       }, []);
 
-      useEffect(() => {
+     useEffect(() => {
         const loadModels = async () => {
           setLoadingMsg('กำลังโหลดโมเดล AI สแกนใบหน้า...');
           try {
+            // ใช้ CDN ของ @vladmandic ที่ตรงกับตัวไลบรารีในหน้าเว็บ (ดึงผ่าน GPU ไวที่สุด)
             const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
+            
             await Promise.all([
-              window.faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL),
+              window.faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
               window.faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
               window.faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
             ]);
+
+            // เปิดการเร่งความเร็วด้วย WebGL (GPU)
+            if (window.faceapi.tf) {
+              await window.faceapi.tf.setBackend('webgl');
+              await window.faceapi.tf.ready();
+            }
+
             setModelsLoaded(true);
           } catch (err) {
             console.error("Model load error:", err);
@@ -587,9 +596,11 @@
       const cachedDescriptorsRef = React.useRef(null);
 
       const runRealTimeMatch = async () => {
+        if (isAnalyzingRef.current) return;
         isAnalyzingRef.current = true;
+
         try {
-          // ตัวเลือกการสแกนความเร็วสูง
+          // ใช้ Tiny Face Detector ขนาด 320
           const detectorOptions = new window.faceapi.TinyFaceDetectorOptions({ 
             inputSize: 320, 
             scoreThreshold: 0.2 
@@ -602,13 +613,12 @@
 
           if (!detection) {
             setAutoScanStatus('กำลังสแกนหาใบหน้าของคุณ...');
-            isAnalyzingRef.current = false;
             return;
           }
 
           setAutoScanStatus('ตรวจพบใบหน้า! กำลังเปรียบเทียบฐานข้อมูล...');
 
-          // ดึงข้อมูลจาก Firebase เฉพาะครั้งแรก แล้วเก็บไว้ใน Memory (ไม่ดึงซ้ำทุกเฟรม)
+          // ดึงพนักงานมาเก็บใน Memory แค่ครั้งเดียว
           if (!cachedDescriptorsRef.current) {
             const { collection, getDocs } = window.FirebaseUtils;
             const empSnapshot = await getDocs(collection(db, 'artifacts', APP_ID, 'public', 'data', 'employees'));
@@ -616,7 +626,6 @@
             if (empSnapshot.empty) {
               setError('ไม่มีข้อมูลพนักงานคนใดลงทะเบียนไว้ในระบบเลย');
               stopAutoScan();
-              isAnalyzingRef.current = false;
               return;
             }
 
@@ -634,16 +643,14 @@
           if (cachedDescriptorsRef.current.length === 0) {
             setError('ไม่พบข้อมูลใบหน้าพนักงานในระบบ');
             stopAutoScan();
-            isAnalyzingRef.current = false;
             return;
           }
 
-          // เปรียบเทียบใบหน้าจาก Memory โดยตรง
           const faceMatcher = new window.faceapi.FaceMatcher(cachedDescriptorsRef.current, 0.45); 
           const bestMatch = faceMatcher.findBestMatch(detection.descriptor);
 
           if (bestMatch.label === 'unknown') {
-            setAutoScanStatus('ไม่พบใบหน้านี้ในระบบ กรุณาลองมองกล้องชัดๆ');
+            setAutoScanStatus('กำลังสแกน... (ยังไม่พบข้อมูลใบหน้าที่ตรงกันในระบบ)');
           } else {
             const [empId, name] = bestMatch.label.split("|||");
             stopAutoScan();
@@ -651,8 +658,10 @@
           }
         } catch (err) {
           console.error("Auto scan err:", err);
+        } finally {
+          // ป้องกันเครื่องค้างด้วยการคืนค่า flag เสมอทุกรอบ
+          isAnalyzingRef.current = false;
         }
-        isAnalyzingRef.current = false;
       };
 
       const saveAttendanceLog = async (empId, name) => {
