@@ -349,39 +349,35 @@
       return (
         <div className="flex flex-col w-full max-w-xl mx-auto gap-4 pb-12">
           {}
-          {/* สรุปสถิติประจำวัน (แสดงเฉพาะตัวเลข) */}
-<div className="bg-slate-900 text-white rounded-3xl p-5 shadow-xl mb-6 border border-slate-800">
-  <div className="flex justify-between items-center mb-4">
-    <div className="flex items-center gap-2">
-      <span className="text-base">📊</span>
-      <span className="text-xs font-bold text-slate-200">
-        สรุปวันนี้ <span className="text-slate-400 font-normal">({new Date().toLocaleDateString('th-TH', { weekday: 'long', day: 'numeric', month: 'short' })})</span>
-      </span>
-    </div>
-    <button 
-      onClick={fetchSummaryData}
-      className="text-[11px] text-slate-400 hover:text-white flex items-center gap-1 bg-slate-800/60 hover:bg-slate-800 px-2.5 py-1 rounded-xl transition"
-    >
-      <span>🔄</span> รีเฟรช
-    </button>
-  </div>
+          <div className="bg-gradient-to-br from-indigo-900 via-slate-900 to-indigo-950 rounded-3xl p-5 text-white shadow-xl border border-indigo-800/40 relative overflow-hidden">
+            <div className="absolute top-0 right-0 w-32 h-32 bg-indigo-500/10 rounded-full blur-2xl pointer-events-none"></div>
+            
+            <div className="flex items-center justify-between border-b border-indigo-800/60 pb-3 mb-4">
+              <div className="flex items-center gap-2">
+                <span className="p-1.5 bg-indigo-500/20 text-indigo-300 rounded-lg text-xs font-bold">📊 สรุปวันนี้</span>
+                <span className="text-xs text-indigo-200 font-medium">{new Date().toLocaleDateString('th-TH', { weekday: 'long', day: 'numeric', month: 'short' })}</span>
+              </div>
+              <button onClick={fetchTodaySummary} className="text-xs text-indigo-300 hover:text-white flex items-center gap-1 transition">
+                <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                รีเฟรช
+              </button>
+            </div>
 
-  {/* แสดงเฉพาะตัวเลขสถิติ 3 ช่อง */}
-  <div className="grid grid-cols-3 gap-3">
-    <div className="bg-slate-800/70 border border-slate-700/50 p-3.5 rounded-2xl text-center">
-      <p className="text-[11px] text-slate-400 font-medium">รายการทั้งหมด</p>
-      <p className="text-2xl font-extrabold text-emerald-400 mt-1">{summary.total || 0}</p>
-    </div>
-    <div className="bg-slate-800/70 border border-slate-700/50 p-3.5 rounded-2xl text-center">
-      <p className="text-[11px] text-slate-400 font-medium">เข้างานปกติ</p>
-      <p className="text-2xl font-extrabold text-indigo-400 mt-1">{summary.onTime || 0}</p>
-    </div>
-    <div className="bg-slate-800/70 border border-slate-700/50 p-3.5 rounded-2xl text-center">
-      <p className="text-[11px] text-slate-400 font-medium">มาสาย</p>
-      <p className="text-2xl font-extrabold text-amber-400 mt-1">{summary.late || 0}</p>
-    </div>
-  </div>
-</div>
+            <div className="grid grid-cols-3 gap-3 text-center mb-4">
+              <div className="bg-white/5 rounded-2xl p-3 border border-white/10">
+                <span className="text-[11px] text-slate-300 font-medium block">รายการทั้งหมด</span>
+                <span className="text-xl font-black text-emerald-400 mt-1 block">{loadingStats ? "..." : todayStats.total}</span>
+              </div>
+              <div className="bg-white/5 rounded-2xl p-3 border border-white/10">
+                <span className="text-[11px] text-slate-300 font-medium block">เข้างานปกติ</span>
+                <span className="text-xl font-black text-indigo-300 mt-1 block">{loadingStats ? "..." : todayStats.normalIn}</span>
+              </div>
+              <div className="bg-white/5 rounded-2xl p-3 border border-white/10">
+                <span className="text-[11px] text-slate-300 font-medium block">มาสาย</span>
+                <span className="text-xl font-black text-amber-400 mt-1 block">{loadingStats ? "..." : todayStats.late}</span>
+              </div>
+            </div>
+
             {}
             {recentLogs.length > 0 && (
               <div className="pt-2 border-t border-indigo-800/40">
